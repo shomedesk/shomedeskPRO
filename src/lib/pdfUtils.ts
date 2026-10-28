@@ -166,14 +166,23 @@ export function generateBillPdf({
         return code ? generateBarcodeBase64(code, { height: 25, width: 1.1 }) : null;
       });
 
-      const tableData = log.items.map((item, idx) => [
-        String(idx + 1),
-        item.name || 'Item',
-        '', // Image cell rendered via didDrawCell
-        `${Number(item.quantity || 1).toFixed(3)} ${item.unit || 'pcs'}`,
-        `${currency} ${formatAmount(item.unitPrice, currency)}`,
-        `${currency} ${formatAmount(item.totalPrice || ((Number(item.quantity) || 1) * (Number(item.unitPrice) || 0)), currency)}`,
-      ]);
+      const tableData = log.items.map((item, idx) => {
+        const isPack = item.orderMode === 'pack' && item.packCount;
+        const qtyStr = isPack
+          ? `${item.packCount} Pk × ${item.piecesPerPack || 24}\n= ${Number(item.quantity || 0)} pcs`
+          : `${item.unit === 'kg' ? Number(item.quantity || 1).toFixed(3) : Number(item.quantity || 1)} ${item.unit || 'pcs'}`;
+        const costStr = isPack && item.packPrice
+          ? `${formatAmount(item.packPrice, currency)}/pk\n(${formatAmount(item.unitPrice, currency)}/pc)`
+          : `${currency} ${formatAmount(item.unitPrice, currency)}`;
+        return [
+          String(idx + 1),
+          item.name || 'Item',
+          '', // Image cell rendered via didDrawCell
+          qtyStr,
+          costStr,
+          `${currency} ${formatAmount(item.totalPrice || ((Number(item.quantity) || 1) * (Number(item.unitPrice) || 0)), currency)}`,
+        ];
+      });
 
       autoTable(doc, {
         startY: 77,
@@ -426,14 +435,23 @@ export function generatePoPdf({
       return code ? generateBarcodeBase64(code, { height: 25, width: 1.1 }) : null;
     });
 
-    const tableData = (po.items || []).map((item, idx) => [
-      String(idx + 1),
-      item.name || 'Item',
-      '', // Rendered by didDrawCell
-      `${Number(item.quantity || 1).toFixed(3)} ${item.unit || 'pcs'}`,
-      `${currency} ${formatAmount(item.unitPrice, currency)}`,
-      `${currency} ${formatAmount(item.totalPrice || ((Number(item.quantity) || 1) * (Number(item.unitPrice) || 0)), currency)}`,
-    ]);
+    const tableData = (po.items || []).map((item, idx) => {
+      const isPack = item.orderMode === 'pack' && item.packCount;
+      const qtyStr = isPack
+        ? `${item.packCount} Pk × ${item.piecesPerPack || 24}\n= ${Number(item.quantity || 0)} pcs`
+        : `${item.unit === 'kg' ? Number(item.quantity || 1).toFixed(3) : Number(item.quantity || 1)} ${item.unit || 'pcs'}`;
+      const costStr = isPack && item.packPrice
+        ? `${formatAmount(item.packPrice, currency)}/pk\n(${formatAmount(item.unitPrice, currency)}/pc)`
+        : `${currency} ${formatAmount(item.unitPrice, currency)}`;
+      return [
+        String(idx + 1),
+        item.name || 'Item',
+        '', // Rendered by didDrawCell
+        qtyStr,
+        costStr,
+        `${currency} ${formatAmount(item.totalPrice || ((Number(item.quantity) || 1) * (Number(item.unitPrice) || 0)), currency)}`,
+      ];
+    });
 
     autoTable(doc, {
       startY: 77,

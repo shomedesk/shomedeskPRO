@@ -574,12 +574,75 @@ function PurchaseEntryForm({
 
   const handleUpdateBillItem = (index: number, field: keyof PurchaseOrderItem, value: any) => {
     const updated = [...billItems];
-    const current = { ...updated[index], [field]: value };
-    if (field === 'quantity' || field === 'unitPrice') {
-      const q = Number(current.quantity) || 0;
-      const p = Number(current.unitPrice) || 0;
-      current.totalPrice = Math.round(q * p * 1000) / 1000;
+    const current = { ...updated[index] };
+
+    if (field === 'orderMode') {
+      const newMode = (value as 'pcs' | 'pack');
+      current.orderMode = newMode;
+      if (newMode === 'pack') {
+        current.unit = 'pack';
+        current.piecesPerPack = current.piecesPerPack && current.piecesPerPack > 0 ? current.piecesPerPack : 24;
+        current.packCount = current.packCount && current.packCount > 0 ? current.packCount : Math.max(1, Math.round((Number(current.quantity) || 24) / current.piecesPerPack));
+        current.quantity = Math.round(current.packCount * current.piecesPerPack * 1000) / 1000;
+        if (!current.packPrice || current.packPrice <= 0) {
+          current.packPrice = Math.round((Number(current.unitPrice) || 0) * current.piecesPerPack * 1000) / 1000;
+        }
+        current.totalPrice = Math.round(current.packCount * current.packPrice * 1000) / 1000;
+      } else {
+        current.unit = 'pcs';
+        current.quantity = Number(current.quantity) || 1;
+        current.unitPrice = Number(current.unitPrice) || 0;
+        current.totalPrice = Math.round(current.quantity * current.unitPrice * 1000) / 1000;
+      }
+    } else if (current.orderMode === 'pack') {
+      if (field === 'packCount') {
+        const pCount = Math.max(0, parseFloat(value) || 0);
+        current.packCount = pCount;
+        const pPerPack = Math.max(1, Number(current.piecesPerPack) || 24);
+        current.quantity = Math.round(pCount * pPerPack * 1000) / 1000;
+        const pPrice = Number(current.packPrice) || 0;
+        current.totalPrice = Math.round(pCount * pPrice * 1000) / 1000;
+        current.unitPrice = pPerPack > 0 ? Math.round((pPrice / pPerPack) * 10000) / 10000 : 0;
+      } else if (field === 'piecesPerPack') {
+        const pPerPack = Math.max(1, parseInt(value) || 1);
+        current.piecesPerPack = pPerPack;
+        const pCount = Number(current.packCount) || 0;
+        current.quantity = Math.round(pCount * pPerPack * 1000) / 1000;
+        const pPrice = Number(current.packPrice) || 0;
+        current.unitPrice = pPerPack > 0 ? Math.round((pPrice / pPerPack) * 10000) / 10000 : 0;
+        current.totalPrice = Math.round(pCount * pPrice * 1000) / 1000;
+      } else if (field === 'packPrice') {
+        const pPrice = Math.max(0, parseFloat(value) || 0);
+        current.packPrice = pPrice;
+        const pCount = Number(current.packCount) || 0;
+        const pPerPack = Math.max(1, Number(current.piecesPerPack) || 24);
+        current.unitPrice = pPerPack > 0 ? Math.round((pPrice / pPerPack) * 10000) / 10000 : 0;
+        current.totalPrice = Math.round(pCount * pPrice * 1000) / 1000;
+      } else if (field === 'quantity') {
+        const q = Math.max(0, parseFloat(value) || 0);
+        current.quantity = q;
+        const pPerPack = Math.max(1, Number(current.piecesPerPack) || 24);
+        current.packCount = pPerPack > 0 ? Math.round((q / pPerPack) * 100) / 100 : 0;
+        const pPrice = Number(current.packPrice) || 0;
+        current.totalPrice = Math.round(current.packCount * pPrice * 1000) / 1000;
+      } else if (field === 'unitPrice') {
+        const u = Math.max(0, parseFloat(value) || 0);
+        current.unitPrice = u;
+        const pPerPack = Math.max(1, Number(current.piecesPerPack) || 24);
+        current.packPrice = Math.round(u * pPerPack * 1000) / 1000;
+        current.totalPrice = Math.round(Number(current.quantity) * u * 1000) / 1000;
+      } else {
+        (current as any)[field] = value;
+      }
+    } else {
+      (current as any)[field] = value;
+      if (field === 'quantity' || field === 'unitPrice') {
+        const q = Number(current.quantity) || 0;
+        const p = Number(current.unitPrice) || 0;
+        current.totalPrice = Math.round(q * p * 1000) / 1000;
+      }
     }
+
     updated[index] = current;
     setBillItems(updated);
     recalcTotal(updated);
@@ -1030,20 +1093,21 @@ function PurchaseEntryForm({
               <span className="font-mono font-bold text-blue-400">{billItems.length} items</span>
             </div>
             <div className="border border-slate-800 rounded-xl overflow-x-auto overflow-y-hidden bg-slate-900/60 scrollbar-thin">
-              <table className="w-full min-w-[760px] text-left text-xs">
+              <table className="w-full min-w-[860px] text-left text-xs">
                 <thead className="bg-slate-950 text-slate-400 text-[10px] font-black uppercase tracking-wider border-b border-slate-800">
                   <tr>
-                    <th className="py-2.5 px-3 min-w-[180px]">Product Name</th>
-                    <th className="py-2.5 px-3 min-w-[130px]">Barcode</th>
-                    <th className="py-2.5 px-2 w-20 text-center">Unit</th>
-                    <th className="py-2.5 px-3 w-24 text-right">Qty</th>
-                    <th className="py-2.5 px-3 w-28 text-right">Cost ({currency})</th>
+                    <th className="py-2.5 px-3 min-w-[170px]">Product Name</th>
+                    <th className="py-2.5 px-3 min-w-[120px]">Barcode</th>
+                    <th className="py-2.5 px-2 w-32 text-center">Unit / Mode</th>
+                    <th className="py-2.5 px-3 min-w-[200px] text-right">Quantity / Packs</th>
+                    <th className="py-2.5 px-3 min-w-[140px] text-right">Cost ({currency})</th>
                     <th className="py-2.5 px-3 min-w-[95px] text-right">Total</th>
                     <th className="py-2.5 px-2 w-10 text-center"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
                   {billItems.map((item, idx) => {
+                    const isPack = item.orderMode === 'pack';
                     const isKg = item.unit === 'kg';
                     return (
                       <tr key={item.id} className="hover:bg-slate-800/40">
@@ -1053,7 +1117,7 @@ function PurchaseEntryForm({
                             value={item.name}
                             onChange={(e) => handleUpdateBillItem(idx, 'name', e.target.value)}
                             placeholder="Item name"
-                            className="w-full bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs text-slate-100 outline-none min-w-[160px]"
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs text-slate-100 outline-none min-w-[150px]"
                           />
                         </td>
                         <td className="py-2 px-3">
@@ -1062,68 +1126,139 @@ function PurchaseEntryForm({
                             value={item.barcode || ''}
                             onChange={(e) => handleUpdateBillItem(idx, 'barcode', e.target.value)}
                             placeholder="Barcode"
-                            className="w-full bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs font-mono text-slate-300 outline-none min-w-[120px]"
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs font-mono text-slate-300 outline-none min-w-[110px]"
                           />
                         </td>
                         <td className="py-2 px-2 text-center">
                           <select
-                            value={item.unit || 'pcs'}
-                            onChange={(e) => handleUpdateBillItem(idx, 'unit', e.target.value)}
-                            className="w-full bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs font-bold text-indigo-400 outline-none"
+                            value={isPack ? 'pack' : (item.unit || 'pcs')}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val === 'pack') {
+                                handleUpdateBillItem(idx, 'orderMode', 'pack');
+                              } else {
+                                if (isPack) {
+                                  handleUpdateBillItem(idx, 'orderMode', 'pcs');
+                                }
+                                handleUpdateBillItem(idx, 'unit', val);
+                              }
+                            }}
+                            className={`w-full bg-slate-950 border rounded-lg p-1.5 text-xs font-bold outline-none cursor-pointer ${
+                              isPack ? 'border-amber-500/50 text-amber-300 bg-amber-950/20' : 'border-slate-800 text-indigo-400'
+                            }`}
                           >
-                            <option value="pcs">pcs</option>
-                            <option value="kg">kg</option>
+                            <option value="pcs">Pcs (পিস)</option>
+                            <option value="pack">📦 Pack (প্যাক/কার্টন)</option>
+                            <option value="kg">Kg (কেজি)</option>
                           </select>
                         </td>
                         <td className="py-2 px-3">
-                          <div className="flex items-center justify-end gap-1">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const step = isKg ? 0.5 : 1;
-                                const current = Number(item.quantity) || 1;
-                                const newQty = Math.max(isKg ? 0.001 : 1, Math.round((current - step) * 1000) / 1000);
-                                handleUpdateBillItem(idx, 'quantity', newQty);
-                              }}
-                              className="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold flex items-center justify-center shrink-0 cursor-pointer text-xs active:scale-95"
-                              title="Decrease Quantity"
-                            >
-                              -
-                            </button>
-                            <input
-                              type="number"
-                              step={isKg ? "0.001" : "1"}
-                              min="0.001"
-                              value={item.quantity}
-                              onChange={(e) => handleUpdateBillItem(idx, 'quantity', parseFloat(e.target.value) || 0)}
-                              placeholder={isKg ? "0.000" : "1"}
-                              className="w-14 bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs text-center text-slate-100 font-bold outline-none"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const step = isKg ? 0.5 : 1;
-                                const current = Number(item.quantity) || 0;
-                                const newQty = Math.round((current + step) * 1000) / 1000;
-                                handleUpdateBillItem(idx, 'quantity', newQty);
-                              }}
-                              className="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold flex items-center justify-center shrink-0 cursor-pointer text-xs active:scale-95"
-                              title="Increase Quantity"
-                            >
-                              +
-                            </button>
-                          </div>
+                          {isPack ? (
+                            <div className="flex flex-col items-end gap-1">
+                              <div className="flex items-center justify-end gap-1">
+                                <div className="flex items-center gap-1 bg-slate-950/80 px-1.5 py-1 rounded-lg border border-slate-800">
+                                  <span className="text-[10px] text-amber-400 font-bold">Packs:</span>
+                                  <input
+                                    type="number"
+                                    min="0.01"
+                                    step="1"
+                                    value={item.packCount ?? ''}
+                                    onChange={(e) => handleUpdateBillItem(idx, 'packCount', e.target.value)}
+                                    placeholder="5"
+                                    className="w-12 bg-transparent text-xs text-center text-amber-300 font-black outline-none"
+                                    title="Number of packs/cartons"
+                                  />
+                                </div>
+                                <span className="text-slate-500 font-black">×</span>
+                                <div className="flex items-center gap-1 bg-slate-950/80 px-1.5 py-1 rounded-lg border border-slate-800">
+                                  <span className="text-[10px] text-indigo-300 font-bold">Pcs/Pk:</span>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    step="1"
+                                    value={item.piecesPerPack ?? ''}
+                                    onChange={(e) => handleUpdateBillItem(idx, 'piecesPerPack', e.target.value)}
+                                    placeholder="24"
+                                    className="w-12 bg-transparent text-xs text-center text-indigo-300 font-black outline-none"
+                                    title="Custom pieces per pack"
+                                  />
+                                </div>
+                              </div>
+                              <span className="text-[10px] font-mono font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                                = {item.quantity || 0} pcs total
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const step = isKg ? 0.5 : 1;
+                                  const current = Number(item.quantity) || 1;
+                                  const newQty = Math.max(isKg ? 0.001 : 1, Math.round((current - step) * 1000) / 1000);
+                                  handleUpdateBillItem(idx, 'quantity', newQty);
+                                }}
+                                className="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold flex items-center justify-center shrink-0 cursor-pointer text-xs active:scale-95"
+                                title="Decrease Quantity"
+                              >
+                                -
+                              </button>
+                              <input
+                                type="number"
+                                step={isKg ? "0.001" : "1"}
+                                min="0.001"
+                                value={item.quantity}
+                                onChange={(e) => handleUpdateBillItem(idx, 'quantity', parseFloat(e.target.value) || 0)}
+                                placeholder={isKg ? "0.000" : "1"}
+                                className="w-14 bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs text-center text-slate-100 font-bold outline-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const step = isKg ? 0.5 : 1;
+                                  const current = Number(item.quantity) || 0;
+                                  const newQty = Math.round((current + step) * 1000) / 1000;
+                                  handleUpdateBillItem(idx, 'quantity', newQty);
+                                }}
+                                className="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold flex items-center justify-center shrink-0 cursor-pointer text-xs active:scale-95"
+                                title="Increase Quantity"
+                              >
+                                +
+                              </button>
+                            </div>
+                          )}
                         </td>
                         <td className="py-2 px-3">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.001"
-                            value={item.unitPrice === 0 ? '' : item.unitPrice}
-                            onChange={(e) => handleUpdateBillItem(idx, 'unitPrice', e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
-                            placeholder="0.000"
-                            className="w-full bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs text-right text-slate-100 font-mono font-bold outline-none min-w-[85px]"
-                          />
+                          {isPack ? (
+                            <div className="flex flex-col items-end gap-1">
+                              <div className="flex items-center gap-1 justify-end">
+                                <span className="text-[10px] text-amber-400 font-semibold">/Pack:</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.001"
+                                  value={item.packPrice === undefined || item.packPrice === 0 ? '' : item.packPrice}
+                                  onChange={(e) => handleUpdateBillItem(idx, 'packPrice', e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
+                                  placeholder="0.000"
+                                  className="w-20 bg-slate-950 border border-amber-500/40 focus:border-amber-400 rounded-lg p-1.5 text-xs text-right text-amber-300 font-mono font-bold outline-none"
+                                  title="Price per pack / carton"
+                                />
+                              </div>
+                              <span className="text-[10px] font-mono text-slate-400">
+                                (={formatAmount(item.unitPrice || 0, currency)}/pc)
+                              </span>
+                            </div>
+                          ) : (
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.001"
+                              value={item.unitPrice === 0 ? '' : item.unitPrice}
+                              onChange={(e) => handleUpdateBillItem(idx, 'unitPrice', e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
+                              placeholder="0.000"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs text-right text-slate-100 font-mono font-bold outline-none min-w-[85px]"
+                            />
+                          )}
                         </td>
                         <td className="py-2 px-3 text-right font-black font-mono text-blue-400 whitespace-nowrap">
                           {currency} {formatAmount(item.totalPrice || 0, currency)}

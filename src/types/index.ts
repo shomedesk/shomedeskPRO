@@ -243,6 +243,11 @@ export interface PurchaseOrderItem {
   currentStock?: number;
   measurement?: string;
   imageUrl?: string;
+  // Pack / Carton Purchase Support
+  orderMode?: 'pcs' | 'pack'; // 'pcs' or 'pack'
+  packCount?: number; // e.g. 5 packs
+  piecesPerPack?: number; // e.g. 24 pcs/pack
+  packPrice?: number; // e.g. cost per pack
 }
 
 export interface PurchaseOrder {
