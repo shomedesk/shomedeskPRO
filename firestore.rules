@@ -1,0 +1,573 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields:
+    //   - role: string ('admin', 'manager', 'branch_manager', 'accountant')
+    //   - businessId: string (for managers/branch managers/accountants)
+    //   - ownedBusinessIds: list<string> (for admins)
+    //
+    // Collection: businesses
+    // Fields:
+    //   - ownerId: string (UID of the admin who created it)
+    //
+    // Collection: branches, bankAccounts, transactions, dailyReports, 
+    //             suppliers, purchaseLogs, tasks, aiSettings, currencyConfigs, cashCounts
+    // Fields:
+    //   - ownerId: string (Denormalized UID of the business owner)
+    //   - businessId: string (ID of the parent business)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isDefaultAdmin() {
+      return isAuthenticated() && (
+        ('email' in request.auth.token && (
+          request.auth.token.email == "shomedesk@gmail.com" ||
+          request.auth.token.email.lower() == "shomedesk@gmail.com"
+        )) ||
+        request.auth.uid == "5KH6pWSLtzUakBBDqrv2n5zSr243"
+      );
+    }
+
+    function isAdmin() {
+      return isDefaultAdmin() || (
+        isAuthenticated() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+        ('role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    function isAccountant() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             ('role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'accountant');
+    }
+
+    function belongsToBusiness(businessId) {
+      return isAuthenticated() && (
+        isAdmin() || 
+        isAccountant() || 
+        businessId == 'global' || (
+          businessId != '' && businessId != null &&
+          exists(/databases/$(database)/documents/businesses/$(businessId)) && 
+          get(/databases/$(database)/documents/businesses/$(businessId)).data.get('ownerId', '') == request.auth.uid
+        ) || (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('businessId', '') == businessId ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('ownedBusinessIds', []).hasAny([businessId])
+          )
+        ) || (
+          'firebase' in request.auth.token && 
+          'sign_in_provider' in request.auth.token.firebase && 
+          request.auth.token.firebase.sign_in_provider == 'anonymous'
+        )
+      );
+    }
+
+    function canWriteBusiness(businessId) {
+      return isAuthenticated() && !isAccountant() && (
+        isAdmin() || 
+        businessId == 'global' || (
+          businessId != '' && businessId != null &&
+          exists(/databases/$(database)/documents/businesses/$(businessId)) && 
+          get(/databases/$(database)/documents/businesses/$(businessId)).data.get('ownerId', '') == request.auth.uid
+        ) || (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('businessId', '') == businessId ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('ownedBusinessIds', []).hasAny([businessId])
+          )
+        ) || (
+          'firebase' in request.auth.token && 
+          'sign_in_provider' in request.auth.token.firebase && 
+          request.auth.token.firebase.sign_in_provider == 'anonymous'
+        )
+      );
+    }
+
+    function isValidNotification(data) {
+      return isValidString(data.title, 1, 200) &&
+             isValidString(data.message, 1, 1000) &&
+             data.type in ['salary_request', 'leave_request', 'document_renewal', 'system'] &&
+             data.status in ['unread', 'read'];
+    }
+
+    function isValidString(val, min, max) {
+      return val is string && val.size() >= min && val.size() <= max;
+    }
+
+    function isValidDescription(val) {
+      return val == null || (val is string && val.size() <= 2000);
+    }
+
+    function isValidMobile(val) {
+      return val == null || (val is string && val.size() <= 30);
+    }
+
+    function isValidAmount(val) {
+      return val is number && val >= 0 && val <= 1000000000; // Max 1 Billion
+    }
+
+    function isValidBusiness(data) {
+      return isValidString(data.name, 1, 100) &&
+             isValidString(data.ownerId, 1, 100) &&
+             isValidDescription(data.get('notes', '')) &&
+             isValidMobile(data.get('mobileNumber', ''));
+    }
+
+    function isValidBranch(data) {
+      return isValidString(data.name, 1, 100) &&
+             isValidString(data.businessId, 1, 100) &&
+             isValidString(data.ownerId, 1, 100) &&
+             isValidDescription(data.get('notes', '')) &&
+             isValidMobile(data.get('mobileNumber', ''));
+    }
+
+    function isValidService(data) {
+      return isValidString(data.name, 1, 100) &&
+             isValidString(data.businessId, 1, 100) &&
+             isValidString(data.ownerId, 1, 100) &&
+             data.type in ['subscription', 'commission', 'ad_revenue', 'software_sale', 'other'] &&
+             isValidDescription(data.get('description', ''));
+    }
+
+    function isValidDocument(data) {
+      return isValidString(data.name, 1, 100) &&
+             isValidString(data.documentNumber, 1, 50) &&
+             isValidString(data.issuedDate, 1, 50) &&
+             isValidString(data.nextRenewalDate, 1, 50) &&
+             isValidDescription(data.get('notes', ''));
+    }
+
+    function isValidTransaction(data) {
+      return isValidAmount(data.amount) &&
+             isValidString(data.category, 1, 100) &&
+             isValidDescription(data.get('description', '')) &&
+             data.type in ['income', 'expense', 'transfer', 'withdraw', 'deposit'];
+    }
+
+    function isValidBankAccount(data) {
+      return isValidString(data.accountName, 1, 100) &&
+             isValidString(data.accountNumber, 1, 50) &&
+             isValidString(data.bankName, 1, 100) &&
+             isValidAmount(data.balance);
+    }
+
+    function isValidDailyReport(data) {
+      return isValidAmount(data.openingCash) &&
+             isValidAmount(data.openingBank) &&
+             isValidAmount(data.cashSale) &&
+             isValidAmount(data.bankSale) &&
+             isValidAmount(data.cashExpense) &&
+             isValidAmount(data.bankExpense) &&
+             isValidAmount(data.get('bankToCash', 0)) &&
+             isValidAmount(data.get('cashToBank', 0)) &&
+             isValidAmount(data.closingCash) &&
+             isValidAmount(data.closingBank) &&
+             isValidDescription(data.get('note', ''));
+    }
+
+    function isValidSupplier(data) {
+      return isValidString(data.name, 1, 100) &&
+             isValidMobile(data.phone) &&
+             isValidDescription(data.get('address', ''));
+    }
+
+    function isValidTask(data) {
+      return isValidString(data.description, 1, 10000) &&
+             data.priority in ['low', 'medium', 'high'] &&
+             data.status in ['pending', 'completed'];
+    }
+
+    function isValidEmployee(data) {
+      return isValidString(data.name, 1, 100) &&
+             isValidString(data.position, 1, 100) &&
+             isValidAmount(data.baseSalary) &&
+             isValidMobile(data.phone);
+    }
+
+    function isValidSalaryRequest(data) {
+      return isValidAmount(data.netSalary) &&
+             data.status in ['pending', 'approved', 'paid', 'rejected'];
+    }
+
+    function isValidCashCount(data) {
+      return isValidAmount(data.totalAmount) &&
+             isValidDescription(data.get('note', ''));
+    }
+
+    function isValidLeaveRequest(data) {
+      return data.employeeId is string && data.employeeId.size() > 0 &&
+             data.employeeName is string && data.employeeName.size() > 0 &&
+             data.startDate is string && data.startDate.size() > 0 &&
+             data.endDate is string && data.endDate.size() > 0 &&
+             data.type in ['sick', 'casual', 'unpaid', 'other'] &&
+             isValidDescription(data.reason) &&
+             data.status in ['pending', 'approved', 'rejected'] &&
+             data.businessId is string && data.businessId.size() > 0 &&
+             data.branchId is string && data.branchId.size() > 0;
+    }
+
+    function isValidPurchaseLog(data) {
+      return isValidString(data.supplierId, 1, 100) &&
+             (data.get('billAmount', null) != null ? isValidAmount(data.billAmount) : (data.get('amount', null) != null ? isValidAmount(data.amount) : true)) &&
+             isValidDescription(data.get('note', ''));
+    }
+
+    function isValidPurchaseOrder(data) {
+      return isValidString(data.supplierId, 1, 100) &&
+             isValidString(data.businessId, 1, 100) &&
+             isValidAmount(data.totalAmount) &&
+             isValidDescription(data.get('notes', ''));
+    }
+
+    function isValidAttendance(data) {
+      return isValidString(data.employeeId, 1, 100) &&
+             isValidString(data.date, 1, 50) &&
+             data.status in ['present', 'absent', 'late', 'half-day'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        isDefaultAdmin() ||
+        // Allow a user to create their profile if an admin pre-authorized their email
+        (request.auth.uid == userId && 
+         exists(/databases/$(database)/documents/users/$(request.auth.token.email)))
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (request.auth.uid == userId && 
+         // Users can only update their own displayName, not their role
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'photoURL', 'businessId', 'branchId', 'ownedBusinessIds']))
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || 
+        isAdmin() || 
+        belongsToBusiness(resource.data.businessId)
+      );
+      allow create: if isAuthenticated() && isValidNotification(request.resource.data);
+      allow update: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || 
+        isAdmin() || 
+        belongsToBusiness(resource.data.businessId)
+      ) && isValidNotification(request.resource.data);
+      allow delete: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid || 
+        isAdmin()
+      );
+    }
+
+    match /businesses/{businessId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && (request.resource.data.ownerId == request.auth.uid || isAdmin()) && isValidBusiness(request.resource.data);
+      allow update: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin()) && 
+                    request.resource.data.ownerId == resource.data.ownerId &&
+                    isValidBusiness(request.resource.data);
+      allow delete: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || isDefaultAdmin());
+    }
+
+    match /branches/{branchId} {
+      allow read: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid || 
+        isAdmin() || 
+        belongsToBusiness(resource.data.businessId) ||
+        // Allow anonymous users to query for manager login
+        ('firebase' in request.auth.token && 
+         'sign_in_provider' in request.auth.token.firebase && 
+         request.auth.token.firebase.sign_in_provider == 'anonymous')
+      );
+      allow create: if isAuthenticated() && (request.resource.data.ownerId == request.auth.uid || isAdmin()) && isValidBranch(request.resource.data);
+      allow update: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin()) &&
+                    request.resource.data.ownerId == resource.data.ownerId &&
+                    request.resource.data.businessId == resource.data.businessId &&
+                    isValidBranch(request.resource.data);
+      allow delete: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin());
+    }
+
+    match /services/{serviceId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() || 
+        resource.data.ownerId == request.auth.uid || 
+        (resource.data.businessId != null && belongsToBusiness(resource.data.businessId))
+      );
+      allow create: if isAuthenticated() && (request.resource.data.ownerId == request.auth.uid || isAdmin()) && isValidService(request.resource.data);
+      allow update: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin()) &&
+                    request.resource.data.ownerId == resource.data.ownerId &&
+                    request.resource.data.businessId == resource.data.businessId &&
+                    isValidService(request.resource.data);
+      allow delete: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin());
+    }
+
+    match /branchDocuments/{docId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if canWriteBusiness(request.resource.data.businessId) 
+                    && isValidDocument(request.resource.data)
+                    // Limit to 10 documents per branch
+                    && get(/databases/$(database)/documents/branches/$(request.resource.data.branchId)).data.get('documentCount', 0) < 10
+                    // Limit file size to 1MB (1048576 bytes)
+                    && request.resource.data.get('fileSize', 0) <= 1048576;
+      allow update: if canWriteBusiness(resource.data.businessId)
+                    && isValidDocument(request.resource.data)
+                    && request.resource.data.get('fileSize', 0) <= 1048576;
+      allow delete: if canWriteBusiness(resource.data.businessId);
+    }
+
+    match /bankAccounts/{accountId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if isAuthenticated() && (request.resource.data.ownerId == request.auth.uid || isAdmin()) && isValidBankAccount(request.resource.data);
+      allow update: if isAuthenticated() && (
+        isAdmin() || (
+          request.resource.data.ownerId == resource.data.ownerId &&
+          request.resource.data.businessId == resource.data.businessId &&
+          isValidBankAccount(request.resource.data)
+        )
+      );
+      allow delete: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin());
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        ('userId' in resource.data && resource.data.userId == request.auth.uid) || 
+        ('businessId' in resource.data && belongsToBusiness(resource.data.businessId))
+      );
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (!('businessId' in request.resource.data) || canWriteBusiness(request.resource.data.businessId))
+      ) && isValidTransaction(request.resource.data);
+      allow update: if isAuthenticated() && (
+        isAdmin() || (
+          (!('businessId' in resource.data) || canWriteBusiness(resource.data.businessId)) &&
+          (!('ownerId' in resource.data) || !('ownerId' in request.resource.data) || request.resource.data.ownerId == resource.data.ownerId) &&
+          (!('businessId' in resource.data) || !('businessId' in request.resource.data) || request.resource.data.businessId == resource.data.businessId) &&
+          isValidTransaction(request.resource.data)
+        )
+      );
+      allow delete: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        ('userId' in resource.data && resource.data.userId == request.auth.uid) || 
+        ('businessId' in resource.data && canWriteBusiness(resource.data.businessId))
+      );
+    }
+
+    match /dailyReports/{reportId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        ('managerId' in resource.data && resource.data.managerId == request.auth.uid) || 
+        ('businessId' in resource.data && belongsToBusiness(resource.data.businessId))
+      );
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (!('businessId' in request.resource.data) || canWriteBusiness(request.resource.data.businessId))
+      ) && isValidDailyReport(request.resource.data);
+      allow update: if isAuthenticated() && (
+        isAdmin() || (
+          (!('businessId' in resource.data) || canWriteBusiness(resource.data.businessId)) &&
+          (!('ownerId' in resource.data) || !('ownerId' in request.resource.data) || request.resource.data.ownerId == resource.data.ownerId) &&
+          (!('businessId' in resource.data) || !('businessId' in request.resource.data) || request.resource.data.businessId == resource.data.businessId) &&
+          isValidDailyReport(request.resource.data)
+        )
+      );
+      allow delete: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        ('managerId' in resource.data && resource.data.managerId == request.auth.uid) || 
+        ('businessId' in resource.data && canWriteBusiness(resource.data.businessId))
+      );
+    }
+
+    match /sales/{saleId} {
+      allow read, write: if isAuthenticated();
+      allow delete: if isAdmin() || isDefaultAdmin();
+    }
+
+    match /pos_transactions/{txnId} {
+      allow read, write: if isAuthenticated();
+      allow delete: if isAdmin() || isDefaultAdmin();
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        ('businessId' in resource.data && belongsToBusiness(resource.data.businessId))
+      );
+      allow create: if isAuthenticated() && (
+        isAdmin() || 
+        (!('businessId' in request.resource.data) || canWriteBusiness(request.resource.data.businessId))
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() || 
+        (!('businessId' in resource.data) || canWriteBusiness(resource.data.businessId))
+      );
+      allow delete: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        ('businessId' in resource.data && canWriteBusiness(resource.data.businessId))
+      );
+    }
+
+    match /suppliers/{supplierId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if canWriteBusiness(request.resource.data.businessId) && isValidSupplier(request.resource.data);
+      allow update: if canWriteBusiness(request.resource.data.businessId) &&
+                    request.resource.data.ownerId == resource.data.ownerId &&
+                    request.resource.data.businessId == resource.data.businessId &&
+                    isValidSupplier(request.resource.data);
+      allow delete: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        canWriteBusiness(resource.data.businessId)
+      );
+    }
+
+    match /purchaseLogs/{logId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if canWriteBusiness(request.resource.data.businessId) && isValidPurchaseLog(request.resource.data);
+      allow update: if canWriteBusiness(resource.data.businessId) &&
+                    request.resource.data.ownerId == resource.data.ownerId &&
+                    request.resource.data.businessId == resource.data.businessId &&
+                    isValidPurchaseLog(request.resource.data);
+      allow delete: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        canWriteBusiness(resource.data.businessId)
+      );
+    }
+
+    match /purchases/{purchaseId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if canWriteBusiness(request.resource.data.businessId) && isValidPurchaseLog(request.resource.data);
+      allow update: if canWriteBusiness(request.resource.data.businessId) &&
+                    request.resource.data.ownerId == resource.data.ownerId &&
+                    request.resource.data.businessId == resource.data.businessId &&
+                    isValidPurchaseLog(request.resource.data);
+      allow delete: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        canWriteBusiness(resource.data.businessId)
+      );
+    }
+
+    match /purchaseOrders/{orderId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if canWriteBusiness(request.resource.data.businessId) && isValidPurchaseOrder(request.resource.data);
+      allow update: if canWriteBusiness(request.resource.data.businessId) &&
+                    request.resource.data.ownerId == resource.data.ownerId &&
+                    request.resource.data.businessId == resource.data.businessId &&
+                    isValidPurchaseOrder(request.resource.data);
+      allow delete: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        canWriteBusiness(resource.data.businessId)
+      );
+    }
+
+    match /supplierProducts/{productId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && !isAccountant();
+      allow delete: if isAuthenticated() && !isAccountant();
+    }
+
+    match /salesPlaySettings/{businessId} {
+      allow read, write: if isAuthenticated();
+      allow delete: if isAdmin() || isDefaultAdmin();
+    }
+
+    match /salesPlayCatalog/{productId} {
+      allow read, write: if isAuthenticated();
+      allow delete: if isAdmin() || isDefaultAdmin();
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if canWriteBusiness(request.resource.data.businessId) && isValidTask(request.resource.data);
+      allow update: if canWriteBusiness(request.resource.data.businessId) &&
+                    request.resource.data.ownerId == resource.data.ownerId &&
+                    request.resource.data.businessId == resource.data.businessId &&
+                    isValidTask(request.resource.data);
+      allow delete: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        canWriteBusiness(resource.data.businessId)
+      );
+    }
+
+    match /employees/{employeeId} {
+      allow read: if isAuthenticated() && (isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow write: if isAuthenticated() && (isAdmin() || (belongsToBusiness(request.resource.data.businessId) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'manager')) && isValidEmployee(request.resource.data);
+    }
+
+    match /attendance/{attendanceId} {
+      allow read: if isAuthenticated() && (isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow write: if canWriteBusiness(request.resource.data.businessId) && isValidAttendance(request.resource.data);
+    }
+
+    match /leaveRequests/{requestId} {
+      allow read: if isAuthenticated() && (isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if canWriteBusiness(request.resource.data.businessId) && isValidLeaveRequest(request.resource.data);
+      allow update: if canWriteBusiness(request.resource.data.businessId) && isValidLeaveRequest(request.resource.data);
+    }
+
+    match /salaryRequests/{requestId} {
+      allow read: if isAuthenticated() && (isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if canWriteBusiness(request.resource.data.businessId) && isValidSalaryRequest(request.resource.data);
+      allow update: if canWriteBusiness(request.resource.data.businessId) && isValidSalaryRequest(request.resource.data);
+    }
+
+    match /aiSettings/{businessId} {
+      allow read: if isAuthenticated() && (resource == null || resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(businessId));
+      allow create: if isAuthenticated() && (isAdmin() || canWriteBusiness(businessId));
+      allow update: if isAuthenticated() && (isAdmin() || canWriteBusiness(businessId));
+    }
+
+    match /currencyConfigs/{configId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow write: if isAuthenticated() && (request.resource.data.ownerId == request.auth.uid || isAdmin());
+    }
+
+    match /cashCounts/{countId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
+      allow create: if canWriteBusiness(request.resource.data.businessId) && isValidCashCount(request.resource.data);
+      allow update: if canWriteBusiness(request.resource.data.businessId) &&
+                    request.resource.data.ownerId == resource.data.ownerId &&
+                    request.resource.data.businessId == resource.data.businessId &&
+                    isValidCashCount(request.resource.data);
+      allow delete: if isAuthenticated() && (
+        isAdmin() || 
+        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
+        canWriteBusiness(resource.data.businessId)
+      );
+    }
+
+    match /systemSettings/{settingId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+  }
+}

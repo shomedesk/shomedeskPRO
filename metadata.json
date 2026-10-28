@@ -1,0 +1,6 @@
+{
+  "name": "ShomeDesk Business",
+  "description": "A daily report submission and supplier control system for ShomeDesk Business, featuring profit/loss dashboards and cash/bank management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

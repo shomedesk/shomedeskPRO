@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ShomeDesk Business</title>
+    <meta name="description" content="A daily report submission and supplier control system for ShomeDesk Business, featuring profit/loss dashboards and cash/bank management." />
+    <meta property="og:title" content="ShomeDesk Business" />
+    <meta property="og:description" content="A daily report submission and supplier control system for ShomeDesk Business, featuring profit/loss dashboards and cash/bank management." />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ShomeDesk" />
+    <meta name="theme-color" content="#0F172A" />
+  </head>
+  <body class="bg-[#0F172A] text-slate-100 min-h-screen" style="background-color: #0F172A; margin: 0; color: #f8fafc;">
+    <div id="root" class="min-h-screen">
+      <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; background-color: #0F172A;">
+        <div style="width: 44px; height: 44px; border: 3px solid rgba(59, 130, 246, 0.2); border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+      </div>
+      <style>
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      </style>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,342 @@
+{
+  "entities": {
+    "business": {
+      "title": "Business",
+      "description": "A business entity representing a multi-tenant SaaS customer.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "currency": { "type": "string" },
+        "mobileNumber": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "ownerId", "currency"]
+    },
+    "branch": {
+      "title": "Branch",
+      "description": "A physical branch of a business.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "name": { "type": "string" },
+        "location": { "type": "string" },
+        "managerName": { "type": "string" },
+        "managerPin": { "type": "string" },
+        "mobileNumber": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "name", "managerName", "managerPin"]
+    },
+    "bankAccount": {
+      "title": "Bank Account",
+      "description": "A bank account associated with a business or branch.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "accountName": { "type": "string" },
+        "accountNumber": { "type": "string" },
+        "bankName": { "type": "string" },
+        "balance": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "accountName", "bankName"]
+    },
+    "user": {
+      "title": "User Profile",
+      "description": "User profile with role and business/branch assignment",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "manager"] },
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" }
+      },
+      "required": ["uid", "email", "role", "businessId"]
+    },
+    "transaction": {
+      "title": "Transaction",
+      "description": "Granular cash or bank transaction",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "userId": { "type": "string" },
+        "type": { "type": "string", "enum": ["income", "expense", "transfer", "withdraw", "deposit"] },
+        "fromAccount": { "type": "string", "enum": ["cash", "bank"] },
+        "toAccount": { "type": "string", "enum": ["cash", "bank"] },
+        "amount": { "type": "number" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "branchId", "type", "amount", "date"]
+    },
+    "dailyReport": {
+      "title": "Daily Report",
+      "description": "Daily summary report from branches",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "managerId": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "openingCash": { "type": "number" },
+        "openingBank": { "type": "number" },
+        "cashSale": { "type": "number" },
+        "bankSale": { "type": "number" },
+        "cashExpense": { "type": "number" },
+        "bankExpense": { "type": "number" },
+        "bankToCash": { "type": "number" },
+        "cashToBank": { "type": "number" },
+        "closingCash": { "type": "number" },
+        "closingBank": { "type": "number" },
+        "note": { "type": "string" }
+      },
+      "required": ["businessId", "branchId", "managerId", "date", "closingCash", "closingBank"]
+    },
+    "supplier": {
+      "title": "Supplier",
+      "description": "Supplier directory per business",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "totalDue": { "type": "number" }
+      },
+      "required": ["businessId", "name", "phone", "totalDue"]
+    },
+    "purchaseLog": {
+      "title": "Purchase Log",
+      "description": "Log of purchases from suppliers",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "billAmount": { "type": "number" },
+        "netDue": { "type": "number" },
+        "date": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "branchId", "supplierId", "invoiceNumber", "billAmount", "netDue"]
+    },
+    "task": {
+      "title": "Task",
+      "description": "Tasks assigned to branches",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "description": { "type": "string" },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "deadline": { "type": "string", "format": "date" },
+        "status": { "type": "string", "enum": ["pending", "completed"] }
+      },
+      "required": ["businessId", "branchId", "description", "status"]
+    },
+    "employee": {
+      "title": "Employee",
+      "description": "Employee details for payroll",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "name": { "type": "string" },
+        "position": { "type": "string" },
+        "baseSalary": { "type": "number" },
+        "joinDate": { "type": "string", "format": "date" },
+        "status": { "type": "string", "enum": ["active", "inactive"] }
+      },
+      "required": ["businessId", "branchId", "name", "baseSalary"]
+    },
+    "attendance": {
+      "title": "Attendance",
+      "description": "Daily attendance record",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "employeeId": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "status": { "type": "string", "enum": ["present", "absent", "late", "half-day"] },
+        "note": { "type": "string" }
+      },
+      "required": ["businessId", "branchId", "employeeId", "date", "status"]
+    },
+    "leaveRequest": {
+      "title": "Leave Request",
+      "description": "Employee leave application",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "employeeId": { "type": "string" },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": "string", "format": "date" },
+        "type": { "type": "string", "enum": ["sick", "casual", "unpaid", "other"] },
+        "reason": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "approvedBy": { "type": "string" }
+      },
+      "required": ["businessId", "branchId", "employeeId", "startDate", "endDate", "type", "status"]
+    },
+    "salaryRequest": {
+      "title": "Salary Request",
+      "description": "Monthly salary processing request",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "employeeId": { "type": "string" },
+        "month": { "type": "string" },
+        "year": { "type": "number" },
+        "baseSalary": { "type": "number" },
+        "deductions": { "type": "number" },
+        "bonuses": { "type": "number" },
+        "netSalary": { "type": "number" },
+        "adjustmentNote": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "paid", "rejected"] },
+        "processedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "branchId", "employeeId", "month", "year", "netSalary", "status"]
+    },
+    "notification": {
+      "title": "Notification",
+      "description": "System notifications for admins and managers",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string", "enum": ["salary_request", "leave_request", "document_renewal", "system"] },
+        "status": { "type": "string", "enum": ["unread", "read"] },
+        "link": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "title", "message", "type", "status", "createdAt"]
+    },
+    "branchDocument": {
+      "title": "Branch Document",
+      "description": "Uploaded documents for a branch (max 10)",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "name": { "type": "string" },
+        "documentNumber": { "type": "string" },
+        "issuedDate": { "type": "string" },
+        "nextRenewalDate": { "type": "string" },
+        "fileUrl": { "type": "string" },
+        "fileName": { "type": "string" },
+        "fileSize": { "type": "number" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "branchId", "name", "documentNumber", "issuedDate", "nextRenewalDate", "fileUrl"]
+    },
+    "purchaseOrder": {
+      "title": "Purchase Order",
+      "description": "Product and supplier wise purchase order with items and barcode",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "poNumber": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["draft", "pending", "fulfilled", "cancelled"] }
+      },
+      "required": ["businessId", "supplierId", "poNumber", "totalAmount", "status"]
+    },
+    "salesPlaySettings": {
+      "title": "SalesPlay Settings",
+      "description": "SalesPlay integration config and branch-to-shop mappings",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "shopId": { "type": "string" }
+      },
+      "required": ["businessId"]
+    }
+  },
+  "firestore": {
+    "/businesses/{businessId}": {
+      "schema": "business",
+      "description": "Business entities"
+    },
+    "/branches/{branchId}": {
+      "schema": "branch",
+      "description": "Branch entities"
+    },
+    "/bankAccounts/{accountId}": {
+      "schema": "bankAccount",
+      "description": "Bank accounts for businesses."
+    },
+    "/users/{uid}": {
+      "schema": "user",
+      "description": "User profile documents"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "transaction",
+      "description": "Financial transactions"
+    },
+    "/dailyReports/{reportId}": {
+      "schema": "dailyReport",
+      "description": "Daily reports submitted by managers"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": "supplier",
+      "description": "Supplier directory"
+    },
+    "/purchaseLogs/{logId}": {
+      "schema": "purchaseLog",
+      "description": "Logs of supplier purchases"
+    },
+    "/tasks/{taskId}": {
+      "schema": "task",
+      "description": "Tasks assigned to branches"
+    },
+    "/employees/{employeeId}": {
+      "schema": "employee",
+      "description": "Employees for payroll"
+    },
+    "/attendance/{attendanceId}": {
+      "schema": "attendance",
+      "description": "Daily attendance records"
+    },
+    "/leaveRequests/{requestId}": {
+      "schema": "leaveRequest",
+      "description": "Leave applications"
+    },
+    "/salaryRequests/{requestId}": {
+      "schema": "salaryRequest",
+      "description": "Salary processing requests"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "notification",
+      "description": "System notifications"
+    },
+    "/branchDocuments/{docId}": {
+      "schema": "branchDocument",
+      "description": "Branch documents"
+    },
+    "/purchaseOrders/{orderId}": {
+      "schema": "purchaseOrder",
+      "description": "Purchase orders created for suppliers"
+    },
+    "/salesPlaySettings/{businessId}": {
+      "schema": "salesPlaySettings",
+      "description": "SalesPlay POS settings and branch mapping"
+    }
+  }
+}

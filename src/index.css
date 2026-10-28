@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --animate-marquee: marquee 30s linear infinite;
+
+  @keyframes marquee {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+}
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  
+  body {
+    background-color: #0F172A;
+    color: #f8fafc;
+    @apply antialiased selection:bg-blue-500/30;
+    overscroll-behavior-y: none;
+  }
+
+  /* App-like feel for mobile */
+  @media (max-width: 768px) {
+    input, select, textarea {
+      font-size: 16px !important; /* Prevent iOS zoom on focus */
+    }
+  }
+}
+
+@layer utilities {
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #334155;
+    border-radius: 10px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #475569;
+  }
+}
+
+@media print {
+  aside, header, nav, .no-print, button, .print\:hidden {
+    display: none !important;
+  }
+
+  html, body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  /* Unclip modal wrappers during print */
+  .fixed {
+    position: static !important;
+    overflow: visible !important;
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    height: auto !important;
+  }
+
+  #printable-bill, #printable-po, #printable-purchase-report, #printable-cash-count, #printable-record-detail {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+    padding: 10px !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+  
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    color: #0f172a !important;
+    background: white !important;
+  }
+  
+  th, td {
+    padding: 6px 8px !important;
+    color: #0f172a !important;
+  }
+  
+  tr {
+    page-break-inside: avoid !important;
+  }
+}
