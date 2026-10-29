@@ -38,12 +38,20 @@ import {
   X,
   AlertCircle,
   Download,
-  Zap
+  Zap,
+  RefreshCw,
+  Edit3
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { Barcode } from './Barcode';
 import { ProductSearchAndScan } from './ProductSearchAndScan';
-import { fetchSalesPlayProductsWithInventory, FALLBACK_SALESPLAY_PRODUCTS } from '@/src/services/salesplay';
+import {
+  fetchSalesPlayProductsWithInventory,
+  syncAllSalesPlayCatalogToFirestore,
+  getSalesPlaySettings,
+  DEFAULT_SALESPLAY_CONFIG,
+  FALLBACK_SALESPLAY_PRODUCTS
+} from '@/src/services/salesplay';
 import { cn } from '@/src/lib/utils';
 import { formatAmount, isWeightItem, toStrictDecimal3 } from '@/src/lib/currencyUtils';
 import { generatePoPdf } from '@/src/lib/pdfUtils';
@@ -78,6 +86,7 @@ export function PurchaseOrderManager({
   const [salesPlayProducts, setSalesPlayProducts] = useState<SalesPlayProduct[]>(FALLBACK_SALESPLAY_PRODUCTS);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
+  const [editingPoId, setEditingPoId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Form State
@@ -95,6 +104,28 @@ export function PurchaseOrderManager({
 
   // Detailed Modal view
   const [viewingPO, setViewingPO] = useState<PurchaseOrder | null>(null);
+
+  const handleStartEditPO = (po: PurchaseOrder) => {
+    setEditingPoId(po.id);
+    setPoNumber(po.poNumber || '');
+    setSupplierId(po.supplierId || '');
+    setBranchId(po.branchId || '');
+    setExpectedDate(po.expectedDate || '');
+    setNotes(po.notes || '');
+    setItems((po.items || []).map(i => ({ ...i })));
+    setIsCreating(true);
+    if (viewingPO) setViewingPO(null);
+    window.scrollTo({ top: 100, behavior: 'smooth' });
+    toast.info(`Editing Purchase Order "${po.poNumber}". Make your changes and save.`);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingPoId(null);
+    setItems([]);
+    setPoNumber(getNextShortPoNumber(purchaseOrders));
+    setNotes('');
+    setIsCreating(false);
+  };
 
   const activeBusiness = useMemo(() => {
     return selectedBusiness || (businesses.length > 0 ? businesses[0] : null);
@@ -146,6 +177,34 @@ export function PurchaseOrderManager({
       isMounted = false;
     };
   }, [activeBusiness]);
+
+  const [refreshingSalesPlay, setRefreshingSalesPlay] = useState(false);
+
+  const handleRefreshSalesPlay = async () => {
+    setRefreshingSalesPlay(true);
+    const toastId = toast.loading('Syncing latest products from SalesPlay POS...');
+    try {
+      const spSettings = activeBusiness ? await getSalesPlaySettings(activeBusiness.id) : null;
+      const token = spSettings?.apiToken || DEFAULT_SALESPLAY_CONFIG.apiToken;
+      const shopId = (branchId && spSettings?.branchShopMap?.[branchId])
+        || spSettings?.selectedShopId
+        || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+      const prods = await fetchSalesPlayProductsWithInventory(token, shopId, true);
+      if (prods && prods.length > 0) {
+        setSalesPlayProducts(prods);
+      }
+      if (activeBusiness?.id) {
+        await syncAllSalesPlayCatalogToFirestore(activeBusiness.id);
+      }
+      toast.success(`Successfully synced ${prods.length} products from SalesPlay!`, { id: toastId });
+    } catch (err: any) {
+      console.warn('PO SalesPlay sync error:', err);
+      toast.error('Could not sync directly from SalesPlay. Using cached items.', { id: toastId });
+    } finally {
+      setRefreshingSalesPlay(false);
+    }
+  };
 
   // Sync default branch
   useEffect(() => {
@@ -467,6 +526,47 @@ export function PurchaseOrderManager({
         createdAt: serverTimestamp(),
       };
 
+      if (editingPoId) {
+        // Update existing Purchase Order
+        await updateDoc(doc(db, 'purchaseOrders', editingPoId), {
+          supplierId,
+          supplierName: selectedSup?.name || 'Supplier',
+          branchId: branchId || 'main',
+          poNumber: poNumber.trim(),
+          items: payload.items,
+          totalAmount: totalPOAmount,
+          expectedDate: expectedDate || format(new Date(), 'yyyy-MM-dd'),
+          notes: notes.trim(),
+          updatedAt: serverTimestamp(),
+        });
+
+        toast.success(`Purchase Order "${poNumber}" updated successfully!`);
+
+        // Automatically sync updated items into Supplier's Product Profile Catalog
+        if (items.length > 0 && supplierId) {
+          try {
+            await saveSupplierProductsFromBill(
+              supplierId,
+              selectedSup?.name || 'Supplier',
+              activeBusiness.id,
+              items,
+              expectedDate || new Date().toISOString()
+            );
+          } catch (syncErr) {
+            console.warn('Supplier product catalog auto-sync notice from PO edit:', syncErr);
+          }
+        }
+
+        setViewingPO({
+          ...purchaseOrders.find(p => p.id === editingPoId)!,
+          ...payload,
+          id: editingPoId,
+        } as any);
+
+        handleCancelEdit();
+        return;
+      }
+
       const docRef = await addDoc(collection(db, 'purchaseOrders'), payload);
       toast.success(`Purchase Order ${poNumber} created successfully!`);
 
@@ -489,13 +589,10 @@ export function PurchaseOrderManager({
       setViewingPO({ id: docRef.id, ...payload } as any);
 
       // Reset form
-      setItems([]);
-      setPoNumber(getNextShortPoNumber(purchaseOrders));
-      setNotes('');
-      setIsCreating(false);
+      handleCancelEdit();
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'purchaseOrders');
-      toast.error('Failed to create purchase order');
+      toast.error(editingPoId ? 'Failed to update purchase order' : 'Failed to create purchase order');
     } finally {
       setSaving(false);
     }
@@ -546,10 +643,32 @@ export function PurchaseOrderManager({
           className="bg-[#1E293B] p-6 rounded-3xl border border-indigo-500/30 shadow-2xl space-y-6"
         >
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
-            <h3 className="text-sm font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2">
-              <Package size={18} /> New Purchase Order Details
+            <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
+              {editingPoId ? (
+                <>
+                  <Edit3 size={18} className="text-amber-400" />
+                  <span className="text-amber-400">Editing Purchase Order</span>
+                  <span className="text-xs font-mono bg-amber-950/80 text-amber-300 px-2 py-0.5 rounded-lg border border-amber-800">
+                    {poNumber}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Package size={18} className="text-indigo-400" />
+                  <span className="text-indigo-400">New Purchase Order Details</span>
+                </>
+              )}
             </h3>
             <div className="flex items-center gap-2">
+              {editingPoId && (
+                <button
+                  type="button"
+                  onClick={handleCancelEdit}
+                  className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer"
+                >
+                  Cancel Edit
+                </button>
+              )}
               <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">PO Number:</span>
               <input 
                 type="text"
@@ -558,14 +677,16 @@ export function PurchaseOrderManager({
                 className="text-xs font-mono font-bold bg-indigo-950/60 text-indigo-300 px-3 py-1.5 rounded-xl border border-indigo-700/60 outline-none w-28 text-center focus:border-indigo-400"
                 placeholder="PO-001"
               />
-              <button
-                type="button"
-                onClick={() => setPoNumber('PO-001')}
-                className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1.5 rounded-xl font-bold transition-colors cursor-pointer"
-                title="Reset sequence to PO-001"
-              >
-                Reset to PO-001
-              </button>
+              {!editingPoId && (
+                <button
+                  type="button"
+                  onClick={() => setPoNumber('PO-001')}
+                  className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1.5 rounded-xl font-bold transition-colors cursor-pointer"
+                  title="Reset sequence to PO-001"
+                >
+                  Reset to PO-001
+                </button>
+              )}
             </div>
           </div>
 
@@ -679,18 +800,30 @@ export function PurchaseOrderManager({
 
           {/* Product Picker Section: Barcode Scanner Gun + Camera Scan + Search Dropdown */}
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <label className="text-xs font-black uppercase tracking-wider text-slate-200 flex items-center gap-2">
                 <BarcodeIcon size={16} className="text-indigo-400" />
                 Product Search & Barcode Scan
               </label>
-              <button
-                type="button"
-                onClick={handleAddManualItem}
-                className="text-xs font-bold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
-              >
-                <Plus size={14} /> Add Custom Product
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleRefreshSalesPlay}
+                  disabled={refreshingSalesPlay}
+                  className="text-xs font-bold text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5 bg-emerald-950/40 hover:bg-emerald-900/50 px-2.5 py-1.5 rounded-xl border border-emerald-800/60 transition-all cursor-pointer shadow-sm active:scale-95"
+                  title="Pull latest items and stock from SalesPlay POS"
+                >
+                  <RefreshCw size={12} className={cn(refreshingSalesPlay && "animate-spin")} />
+                  <span>{refreshingSalesPlay ? "Syncing..." : "Sync SalesPlay Items"}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddManualItem}
+                  className="text-xs font-bold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer bg-indigo-950/40 hover:bg-indigo-900/50 px-2.5 py-1.5 rounded-xl border border-indigo-800/60"
+                >
+                  <Plus size={14} /> Add Custom Product
+                </button>
+              </div>
             </div>
 
             <ProductSearchAndScan
@@ -698,6 +831,8 @@ export function PurchaseOrderManager({
               onSelectProduct={handleSelectProduct}
               onAddCustomWithBarcode={handleAddCustomWithBarcode}
               currency={currency}
+              onSyncSalesPlay={handleRefreshSalesPlay}
+              isSyncing={refreshingSalesPlay || loadingProducts}
             />
           </div>
 
@@ -943,14 +1078,21 @@ export function PurchaseOrderManager({
             type="button"
             onClick={handleSubmitPO}
             disabled={saving || items.length === 0}
-            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-black py-4 px-6 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 shadow-lg shadow-indigo-900/30 cursor-pointer"
+            className={cn(
+              "w-full disabled:opacity-50 text-white font-black py-4 px-6 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 shadow-lg cursor-pointer",
+              editingPoId
+                ? "bg-amber-600 hover:bg-amber-500 shadow-amber-900/30"
+                : "bg-indigo-600 hover:bg-indigo-500 shadow-indigo-900/30"
+            )}
           >
             {saving ? (
               <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-b-2 border-white"></div>
+            ) : editingPoId ? (
+              <Edit3 size={20} />
             ) : (
               <FileText size={20} />
             )}
-            Save & Generate Purchase Order Bill
+            {editingPoId ? 'Save & Update Purchase Order' : 'Save & Generate Purchase Order Bill'}
           </button>
         </div>
       )}
@@ -1008,13 +1150,24 @@ export function PurchaseOrderManager({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3 self-end md:self-auto">
+                <div className="flex items-center gap-2.5 flex-wrap self-end md:self-auto">
                   <div className="text-right mr-2">
                     <p className="text-base font-black font-mono text-indigo-400">
                       {currency} {formatAmount(po.totalAmount || 0, currency)}
                     </p>
                     <p className="text-[10px] text-slate-500 uppercase tracking-wider">Total Value</p>
                   </div>
+
+                  {/* Edit PO Button */}
+                  <button
+                    type="button"
+                    onClick={() => handleStartEditPO(po)}
+                    className="flex items-center gap-1.5 bg-amber-600/90 hover:bg-amber-500 text-white text-xs font-bold py-2.5 px-3 rounded-xl shadow-md shadow-amber-950/40 transition-all cursor-pointer active:scale-95"
+                    title="Edit Purchase Order items & details"
+                  >
+                    <Edit3 size={14} />
+                    <span>Edit PO</span>
+                  </button>
 
                   {/* Download PO button */}
                   <button
@@ -1079,6 +1232,7 @@ export function PurchaseOrderManager({
           business={activeBusiness}
           branch={branches.find(b => b.id === viewingPO.branchId)}
           onClose={() => setViewingPO(null)}
+          onEdit={() => handleStartEditPO(viewingPO)}
           onUseInBillEntry={() => {
             if (onSelectForBillEntry) {
               onSelectForBillEntry(viewingPO);
@@ -1115,6 +1269,7 @@ function PurchaseOrderBillModal({
   business,
   branch,
   onClose,
+  onEdit,
   onUseInBillEntry,
 }: {
   po: PurchaseOrder;
@@ -1122,6 +1277,7 @@ function PurchaseOrderBillModal({
   business?: Business | null;
   branch?: Branch | null;
   onClose: () => void;
+  onEdit?: () => void;
   onUseInBillEntry?: () => void;
 }) {
   const handleDownloadPdf = () => {
@@ -1152,6 +1308,15 @@ function PurchaseOrderBillModal({
           </div>
 
           <div className="flex items-center gap-2">
+            {onEdit && (
+              <button
+                type="button"
+                onClick={onEdit}
+                className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold py-2.5 px-3.5 rounded-xl shadow cursor-pointer transition-all active:scale-95"
+              >
+                <Edit3 size={14} /> Edit PO
+              </button>
+            )}
             {po.status !== 'fulfilled' && onUseInBillEntry && (
               <button
                 type="button"

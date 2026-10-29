@@ -31,13 +31,11 @@ async function safeFetchSalesPlayJson<T>(
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
 
   // Candidate URLs in priority order:
-  // 1. Local/Applet reverse proxy (/api/salesplay) - handles full pagination and CORS cleanly
-  // 2. Public CORS proxy (for launched static sites or external browser sessions)
-  // 3. Direct SalesPlay API endpoint
-  const candidateUrls = [
+  // 1. Local/Applet reverse proxy (/api/salesplay) - handles CORS, pagination, and auth
+  // 2. Direct SalesPlay API endpoint (for browsers/clients with direct network reach)
+  const candidateUrls: string[] = [
     `/api/salesplay${cleanPath}`,
-    `https://corsproxy.io/?url=${encodeURIComponent(`${SALESPLAY_API_BASE}${cleanPath}`)}`,
-    `${SALESPLAY_API_BASE}${cleanPath}`
+    `${SALESPLAY_API_BASE}${cleanPath}`,
   ];
 
   for (const url of candidateUrls) {
@@ -50,7 +48,7 @@ async function safeFetchSalesPlayJson<T>(
       const text = await res.text();
       const trimmed = text.trim();
 
-      // Guard against HTML error pages (e.g. <!doctype html...) from static hosts or proxies
+      // Guard against HTML error pages (e.g. <!doctype html...) from static hosts or 404s
       if (trimmed.startsWith('<') || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
         continue;
       }
@@ -382,7 +380,7 @@ export async function syncAllSalesPlayCatalogToFirestore(businessId?: string): P
  */
 export async function updateSalesPlayInventory(
   shopId: string,
-  itemsToUpdate: { productId: string; quantityToAdd: number }[],
+  itemsToUpdate: { productId: string; quantityToAdd?: number; quantityDelta?: number }[],
   token?: string
 ): Promise<{ success: boolean; message: string; updatedCount: number }> {
   if (!itemsToUpdate || itemsToUpdate.length === 0) {
@@ -392,8 +390,34 @@ export async function updateSalesPlayInventory(
   const authToken = token || DEFAULT_SALESPLAY_CONFIG.apiToken;
   const targetShop = shopId || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
 
+  // Filter down to valid SalesPlay product IDs and non-zero deltas
+  const validItems = itemsToUpdate
+    .map(i => {
+      const delta = i.quantityDelta !== undefined ? Number(i.quantityDelta) : Number(i.quantityToAdd);
+      return {
+        productId: i.productId,
+        delta: isNaN(delta) ? 0 : delta,
+      };
+    })
+    .filter(i => 
+      i.productId && 
+      typeof i.productId === 'string' && 
+      i.productId.length > 10 && 
+      !i.productId.startsWith('item_') && 
+      !i.productId.startsWith('sp_') &&
+      i.delta !== 0
+    );
+
+  if (validItems.length === 0) {
+    return { 
+      success: true, 
+      message: 'No SalesPlay items with non-zero stock changes to update in inventory', 
+      updatedCount: 0 
+    };
+  }
+
   try {
-    // 1. Get current stock
+    // 1. Fetch current live stock
     const invData = await safeFetchSalesPlayJson<{ inventory_levels?: any[] }>('/inventory', {
       headers: {
         'Authorization': `Bearer ${authToken}`,
@@ -403,24 +427,29 @@ export async function updateSalesPlayInventory(
     const levels = invData?.inventory_levels || [];
     const stockMap: { [productId: string]: number } = {};
     for (const lvl of levels) {
-      if (lvl.shop_id === targetShop) {
+      if (!targetShop || lvl.shop_id === targetShop) {
         stockMap[lvl.product_id] = Number(lvl.in_stock) || 0;
       }
     }
 
-    // 2. Prepare payload
-    const inventoryLevelsPayload = itemsToUpdate.map(item => {
+    // 2. Prepare payload (supports both stock gain (+) and stock reduction/return (-))
+    const inventoryLevelsPayload = validItems.map(item => {
       const currentStock = stockMap[item.productId] ?? 0;
-      const newStock = Math.max(0, currentStock + item.quantityToAdd);
+      const newStock = Math.max(0, currentStock + item.delta);
       return {
         shop_id: targetShop,
         product_id: item.productId,
-        in_stock: newStock,
+        in_stock: Math.round(newStock * 1000) / 1000,
       };
     });
 
-    // 3. Post stock updates
-    const result = await safeFetchSalesPlayJson<{ success?: boolean; code?: string; errors?: { details?: string } }>('/inventory', {
+    // 3. Post stock updates batch
+    const result = await safeFetchSalesPlayJson<{ 
+      success?: any; 
+      code?: string; 
+      errors?: { details?: string; field?: string }; 
+      message?: string 
+    }>('/inventory', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${authToken}`,
@@ -431,19 +460,55 @@ export async function updateSalesPlayInventory(
       }),
     });
 
-    if (result && (result.success || result.code === 'SUCCESS')) {
+    const isSuccess = !!result && (
+      result.code === 'SUCCESS' ||
+      result.success === true ||
+      (typeof result.success === 'object' && result.success !== null)
+    );
+
+    if (isSuccess) {
       return {
         success: true,
         message: 'SalesPlay stock updated successfully',
         updatedCount: inventoryLevelsPayload.length,
       };
-    } else {
+    }
+
+    // If batch failed (e.g. one product in array was deleted in SalesPlay), retry item-by-item so valid items still gain stock!
+    let individualSuccessCount = 0;
+    for (const singleItem of inventoryLevelsPayload) {
+      try {
+        const singleRes = await safeFetchSalesPlayJson<{ success?: any; code?: string }>('/inventory', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${authToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            inventory_levels: [singleItem],
+          }),
+        });
+        if (singleRes && (singleRes.code === 'SUCCESS' || singleRes.success === true || typeof singleRes.success === 'object')) {
+          individualSuccessCount++;
+        }
+      } catch {
+        // continue
+      }
+    }
+
+    if (individualSuccessCount > 0) {
       return {
-        success: false,
-        message: result?.errors?.details || 'Failed to update SalesPlay stock',
-        updatedCount: 0,
+        success: true,
+        message: `Updated stock for ${individualSuccessCount} of ${inventoryLevelsPayload.length} items in SalesPlay POS`,
+        updatedCount: individualSuccessCount,
       };
     }
+
+    return {
+      success: false,
+      message: result?.errors?.details || result?.message || 'Failed to update SalesPlay stock',
+      updatedCount: 0,
+    };
   } catch (error: any) {
     console.warn('SalesPlay inventory update notice:', error);
     return {

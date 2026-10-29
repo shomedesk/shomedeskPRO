@@ -11,7 +11,8 @@ import {
   Upload,
   Zap,
   CornerDownLeft,
-  Sparkles
+  Sparkles,
+  RefreshCw
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { formatAmount } from '@/src/lib/currencyUtils';
@@ -24,6 +25,8 @@ interface ProductSearchAndScanProps {
   onAddCustomWithBarcode?: (barcode: string) => void;
   currency: string;
   autoFocusScanner?: boolean;
+  onSyncSalesPlay?: () => Promise<void>;
+  isSyncing?: boolean;
 }
 
 export function ProductSearchAndScan({
@@ -32,6 +35,8 @@ export function ProductSearchAndScan({
   onAddCustomWithBarcode,
   currency,
   autoFocusScanner = true,
+  onSyncSalesPlay,
+  isSyncing = false,
 }: ProductSearchAndScanProps) {
   const [barcodeInput, setBarcodeInput] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
@@ -116,7 +121,11 @@ export function ProductSearchAndScan({
         icon: <CheckCircle2 className="text-emerald-400" size={16} />,
       });
     } else {
-      // If not in catalog, add custom item or notify
+      // If not in catalog, check if user just added it in SalesPlay POS
+      if (onSyncSalesPlay) {
+        toast.info(`Barcode "${raw}" not in local catalog. Syncing latest products from SalesPlay...`);
+        onSyncSalesPlay().catch(() => {});
+      }
       if (onAddCustomWithBarcode) {
         onAddCustomWithBarcode(raw);
         toast.info(`New barcode "${raw}" added to bill list. Enter item details.`);
@@ -214,15 +223,29 @@ export function ProductSearchAndScan({
 
       {/* 1. Barcode Scanner Gun & Quick Scan Form */}
       <div className="space-y-1.5">
-        <div className="flex items-center justify-between text-[11px]">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
           <span className="font-bold text-slate-300 flex items-center gap-1.5">
             <BarcodeIcon size={14} className="text-indigo-400" />
             <span>Barcode Scanner (Gun / Keyboard / Photo / Camera):</span>
           </span>
-          <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-medium">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse inline-block" />
-            Ready to Scan
-          </span>
+          <div className="flex items-center gap-2">
+            {onSyncSalesPlay && (
+              <button
+                type="button"
+                onClick={onSyncSalesPlay}
+                disabled={isSyncing}
+                className="flex items-center gap-1.5 bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 border border-indigo-700/60 text-[10px] font-bold px-2.5 py-0.5 rounded-lg transition-all cursor-pointer active:scale-95 disabled:opacity-50"
+                title="Sync and import newly added items from SalesPlay POS"
+              >
+                <RefreshCw size={11} className={isSyncing ? 'animate-spin text-indigo-400' : 'text-indigo-400'} />
+                <span>{isSyncing ? 'Syncing...' : 'Sync SalesPlay Items'}</span>
+              </button>
+            )}
+            <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-medium">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse inline-block" />
+              Ready
+            </span>
+          </div>
         </div>
 
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">

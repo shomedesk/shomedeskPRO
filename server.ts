@@ -25,8 +25,11 @@ app.use((req, res, next) => {
 });
 
 import https from 'https';
+import fs from 'fs';
 
-// Helper to make direct HTTPS calls to SalesPlay API with JSON payload support on GET/POST
+const DEFAULT_SALESPLAY_API_TOKEN = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJsb2dpbl9uYW1lIjoibWFrYXJlbWJha2thbGFAZ21haWwuY29tIiwiZGF0ZSI6IkZyaWRheSAyNXRoIDIwMjZmIFNlcHRlbWJlciAyMDI2IDAxOjA1OjU1IEFNIn0.wmzb6XXPzLK_xsmyML7KA8U9_NNC9W0m26nlM29afsU';
+
+// Helper to make direct HTTPS calls to SalesPlay API with JSON payload support on POST and GET
 function executeSalesPlayRequest(
   endpointPath: string,
   method: string,
@@ -34,11 +37,18 @@ function executeSalesPlayRequest(
   payload?: any
 ): Promise<{ statusCode: number; headers: Record<string, any>; data: string }> {
   return new Promise((resolve, reject) => {
-    const postData = payload !== undefined && payload !== null
-      ? (typeof payload === 'string' ? payload : JSON.stringify(payload))
-      : '';
+    const finalPath = `/v1.0${endpointPath}`;
+    let postData = '';
 
-    const reqHeaders: Record<string, string> = { ...headers };
+    // SalesPlay POS PHP backend requires pagination & filter params (limit, cursor) in JSON body
+    if (payload !== undefined && payload !== null) {
+      postData = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    }
+
+    const reqHeaders: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      ...headers,
+    };
     if (postData) {
       reqHeaders['Content-Type'] = 'application/json';
       reqHeaders['Content-Length'] = String(Buffer.byteLength(postData));
@@ -47,10 +57,10 @@ function executeSalesPlayRequest(
     const req = https.request(
       {
         hostname: 'api.salesplaypos.com',
-        path: `/v1.0${endpointPath}`,
+        path: finalPath,
         method,
         headers: reqHeaders,
-        timeout: 15000,
+        timeout: 25000,
       },
       (res) => {
         let buf = '';
@@ -93,13 +103,11 @@ app.all('/api/salesplay*', async (req, res) => {
     targetPath = targetPath.replace(/^\/categories/, '/category');
   }
 
-  const rawAuth = (req.headers.authorization as string) || '';
+  const rawAuth = (req.headers.authorization as string) || `Bearer ${DEFAULT_SALESPLAY_API_TOKEN}`;
   const headers: Record<string, string> = {
     Accept: 'application/json, text/plain, */*',
+    Authorization: rawAuth.startsWith('Bearer ') ? rawAuth : `Bearer ${rawAuth}`,
   };
-  if (rawAuth) {
-    headers['Authorization'] = rawAuth;
-  }
 
   try {
     const cleanPath = targetPath.split('?')[0];
@@ -107,12 +115,13 @@ app.all('/api/salesplay*', async (req, res) => {
     // Special auto-paginated handling for GET /products:
     if (req.method === 'GET' && cleanPath === '/products') {
       const allProducts: any[] = [];
+      const seenIds = new Set<string>();
       let cursor = (req.query.cursor as string) || '';
       let lastCursor = '';
 
       // If client explicitly requests a single page
       if (req.query.page_only === 'true') {
-        const body: Record<string, any> = { limit: 100 };
+        const body: Record<string, any> = { limit: 250 };
         if (cursor) body.cursor = cursor;
         const result = await executeSalesPlayRequest('/products', 'GET', headers, body);
         res.status(result.statusCode);
@@ -120,9 +129,11 @@ app.all('/api/salesplay*', async (req, res) => {
         return res.send(result.data);
       }
 
-      // Loop to fetch all products across all pages
-      while (true) {
-        const body: Record<string, any> = { limit: 100 };
+      // Loop to fetch ALL products across all pages
+      let pageCount = 0;
+      while (pageCount < 30) {
+        pageCount++;
+        const body: Record<string, any> = { limit: 250 };
         if (cursor) body.cursor = cursor;
         const result = await executeSalesPlayRequest('/products', 'GET', headers, body);
         if (result.statusCode !== 200) {
@@ -138,9 +149,20 @@ app.all('/api/salesplay*', async (req, res) => {
           break;
         }
         const prods = parsed.products || [];
-        allProducts.push(...prods);
+        if (!Array.isArray(prods) || prods.length === 0) {
+          break;
+        }
+        for (const p of prods) {
+          const key = p.id || p.product_code;
+          if (key && !seenIds.has(key)) {
+            seenIds.add(key);
+            allProducts.push(p);
+          } else if (!key) {
+            allProducts.push(p);
+          }
+        }
         lastCursor = parsed.cursor || '';
-        if (!parsed.cursor || prods.length === 0 || parsed.cursor === cursor) {
+        if (!parsed.cursor || parsed.cursor === cursor) {
           break;
         }
         cursor = parsed.cursor;
@@ -157,7 +179,7 @@ app.all('/api/salesplay*', async (req, res) => {
 
     // Special handling for GET /category:
     if (req.method === 'GET' && (cleanPath === '/category' || cleanPath === '/categories')) {
-      const result = await executeSalesPlayRequest('/category', 'GET', headers, { limit: 100 });
+      const result = await executeSalesPlayRequest('/category', 'GET', headers, { limit: 250 });
       res.status(result.statusCode);
       res.setHeader('Content-Type', 'application/json');
       return res.send(result.data);
@@ -166,11 +188,14 @@ app.all('/api/salesplay*', async (req, res) => {
     // Special handling for GET /inventory:
     if (req.method === 'GET' && cleanPath === '/inventory') {
       const allLevels: any[] = [];
+      const seenKeys = new Set<string>();
       let cursor = (req.query.cursor as string) || '';
       let lastCursor = '';
 
-      while (true) {
-        const body: Record<string, any> = { limit: 100 };
+      let pageCount = 0;
+      while (pageCount < 30) {
+        pageCount++;
+        const body: Record<string, any> = { limit: 250 };
         if (cursor) body.cursor = cursor;
         const result = await executeSalesPlayRequest('/inventory', 'GET', headers, body);
         if (result.statusCode !== 200) {
@@ -186,9 +211,18 @@ app.all('/api/salesplay*', async (req, res) => {
           break;
         }
         const levels = parsed.inventory_levels || [];
-        allLevels.push(...levels);
+        if (!Array.isArray(levels) || levels.length === 0) {
+          break;
+        }
+        for (const lvl of levels) {
+          const key = `${lvl.product_id}_${lvl.shop_id || ''}`;
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            allLevels.push(lvl);
+          }
+        }
         lastCursor = parsed.cursor || '';
-        if (!parsed.cursor || levels.length === 0 || parsed.cursor === cursor) {
+        if (!parsed.cursor || parsed.cursor === cursor) {
           break;
         }
         cursor = parsed.cursor;
@@ -204,7 +238,7 @@ app.all('/api/salesplay*', async (req, res) => {
     }
 
     // Standard proxy for all other requests (POST receipts, POST inventory, shops, etc.)
-    const payload = (req.method !== 'GET' && req.method !== 'HEAD' && req.body && Object.keys(req.body).length > 0)
+    const payload = (req.body && Object.keys(req.body).length > 0)
       ? req.body
       : undefined;
 
@@ -228,7 +262,11 @@ app.get('/api/health', (_req, res) => {
 });
 
 // Production vs Development routing
-const isProduction = process.env.NODE_ENV === 'production';
+const distPath = path.resolve(__dirname, 'dist');
+const hasDist = fs.existsSync(path.resolve(distPath, 'index.html'));
+const isProduction = process.env.NODE_ENV === 'production' || 
+  process.env.npm_lifecycle_event === 'start' ||
+  (hasDist && process.env.DISABLE_HMR === 'true');
 
 if (!isProduction) {
   const { createServer } = await import('vite');
@@ -241,7 +279,6 @@ if (!isProduction) {
   });
   app.use(vite.middlewares);
 } else {
-  const distPath = path.resolve(__dirname, 'dist');
   app.use(express.static(distPath));
 
   app.get('*', (_req, res) => {

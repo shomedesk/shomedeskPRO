@@ -51,7 +51,9 @@ import {
   Zap,
   Package,
   Layers,
-  Sparkles
+  Sparkles,
+  RefreshCw,
+  Edit3
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { format } from 'date-fns';
@@ -61,6 +63,7 @@ import { PurchaseOrderManager } from './PurchaseOrderManager';
 import { BillReceiptModal } from './BillReceiptModal';
 import { PurchaseReportModal } from './PurchaseReportModal';
 import { SalesPlaySyncModal } from './SalesPlaySyncModal';
+import { EditPurchaseBillModal } from './EditPurchaseBillModal';
 import { Barcode } from './Barcode';
 import { ProductSearchAndScan } from './ProductSearchAndScan';
 import { SupplierProductProfileModal } from './SupplierProductProfileModal';
@@ -80,6 +83,7 @@ import {
   getSalesPlaySettings,
   fetchSalesPlayProductsWithInventory,
   fetchSalesPlayCategories,
+  syncAllSalesPlayCatalogToFirestore,
   DEFAULT_SALESPLAY_CONFIG,
   FALLBACK_SALESPLAY_PRODUCTS,
   FALLBACK_SALESPLAY_CATEGORIES
@@ -94,6 +98,46 @@ export default function Suppliers() {
   const [loading, setLoading] = useState(true);
   const [selectedPOForEntry, setSelectedPOForEntry] = useState<PurchaseOrder | null>(null);
   const [showSalesPlayModal, setShowSalesPlayModal] = useState(false);
+  const [salesPlayProducts, setSalesPlayProducts] = useState<SalesPlayProduct[]>(FALLBACK_SALESPLAY_PRODUCTS);
+  const [isSyncingSalesPlay, setIsSyncingSalesPlay] = useState(false);
+
+  // Initial load of complete SalesPlay catalog
+  useEffect(() => {
+    let isMounted = true;
+    fetchSalesPlayProductsWithInventory(undefined, undefined, false).then(prods => {
+      if (isMounted && prods && prods.length > 0) {
+        setSalesPlayProducts(prods);
+      }
+    }).catch(() => {});
+    return () => { isMounted = false; };
+  }, []);
+
+  const handleSyncSalesPlay = async () => {
+    setIsSyncingSalesPlay(true);
+    const toastId = toast.loading('Syncing latest product catalog from SalesPlay POS...');
+    try {
+      const activeBus = selectedBusiness || (businesses.length > 0 ? businesses[0] : null);
+      const spSettings = activeBus ? await getSalesPlaySettings(activeBus.id) : null;
+      const token = spSettings?.apiToken || DEFAULT_SALESPLAY_CONFIG.apiToken;
+      const shopId = spSettings?.selectedShopId || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+      const prods = await fetchSalesPlayProductsWithInventory(token, shopId, true);
+      if (prods && prods.length > 0) {
+        setSalesPlayProducts(prods);
+        toast.dismiss(toastId);
+        toast.success(`Successfully synced ${prods.length} products from SalesPlay POS!`);
+      } else {
+        toast.dismiss(toastId);
+        toast.info('No new products found in SalesPlay.');
+      }
+    } catch (err: any) {
+      toast.dismiss(toastId);
+      console.warn('Sync SalesPlay notice:', err);
+      toast.error(`Sync notice: ${err?.message || 'Check network connection'}`);
+    } finally {
+      setIsSyncingSalesPlay(false);
+    }
+  };
 
   useEffect(() => {
     if (!selectedBusiness && !isAllBusinessesSelected) {
@@ -247,6 +291,9 @@ export default function Suppliers() {
               currency={currency}
               importedPO={selectedPOForEntry}
               onClearImportedPO={() => setSelectedPOForEntry(null)}
+              salesPlayProducts={salesPlayProducts}
+              onSyncSalesPlay={handleSyncSalesPlay}
+              isSyncingSalesPlay={isSyncingSalesPlay}
             />
           )}
           <RecentLogs
@@ -256,6 +303,10 @@ export default function Suppliers() {
             businesses={businesses}
             isAllBusinessesSelected={isAllBusinessesSelected}
             suppliers={suppliers}
+            salesPlayProducts={salesPlayProducts}
+            activeBusinessId={selectedBusiness?.id || (businesses.length > 0 ? businesses[0]?.id : undefined)}
+            onSyncSalesPlay={handleSyncSalesPlay}
+            isSyncingSalesPlay={isSyncingSalesPlay}
           />
         </div>
       )}
@@ -330,11 +381,17 @@ function PurchaseEntryForm({
   currency,
   importedPO,
   onClearImportedPO,
+  salesPlayProducts: propSalesPlayProducts,
+  onSyncSalesPlay,
+  isSyncingSalesPlay = false,
 }: {
   suppliers: Supplier[];
   currency: string;
   importedPO?: PurchaseOrder | null;
   onClearImportedPO?: () => void;
+  salesPlayProducts?: SalesPlayProduct[];
+  onSyncSalesPlay?: () => Promise<void>;
+  isSyncingSalesPlay?: boolean;
 }) {
   const { selectedBusiness, selectedBranch, businesses, branches, isAllBusinessesSelected, bankAccounts, userProfile } = useBusiness();
   const [selectedBranchId, setSelectedBranchId] = useState<string>(selectedBranch?.id || '');
@@ -359,8 +416,16 @@ function PurchaseEntryForm({
 
   // Purchased items (can be loaded from PO or manually added)
   const [billItems, setBillItems] = useState<PurchaseOrderItem[]>([]);
-  const [salesPlayProducts, setSalesPlayProducts] = useState<SalesPlayProduct[]>(FALLBACK_SALESPLAY_PRODUCTS);
+  const [salesPlayProducts, setSalesPlayProducts] = useState<SalesPlayProduct[]>(
+    propSalesPlayProducts || FALLBACK_SALESPLAY_PRODUCTS
+  );
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (propSalesPlayProducts && propSalesPlayProducts.length > 0) {
+      setSalesPlayProducts(propSalesPlayProducts);
+    }
+  }, [propSalesPlayProducts]);
 
   // Supplier Products Profile State
   const [supplierProducts, setSupplierProducts] = useState<SupplierProduct[]>([]);
@@ -425,6 +490,42 @@ function PurchaseEntryForm({
   }, [paymentMode, effectiveBankAccounts, selectedBankAccountId]);
 
   const [salesPlayCategories, setSalesPlayCategories] = useState<SalesPlayCategory[]>(FALLBACK_SALESPLAY_CATEGORIES);
+  const [refreshingSalesPlay, setRefreshingSalesPlay] = useState(false);
+
+  const handleRefreshSalesPlayItems = async () => {
+    setRefreshingSalesPlay(true);
+    const toastId = toast.loading('Syncing latest products & inventory from SalesPlay POS...');
+    try {
+      const spSettings = activeBusiness ? await getSalesPlaySettings(activeBusiness.id) : null;
+      const token = spSettings?.apiToken || DEFAULT_SALESPLAY_CONFIG.apiToken;
+      const shopId = (selectedBranchId && spSettings?.branchShopMap?.[selectedBranchId])
+        || spSettings?.selectedShopId
+        || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+      const [prods, cats] = await Promise.all([
+        fetchSalesPlayProductsWithInventory(token, shopId, true),
+        fetchSalesPlayCategories(token, true),
+      ]);
+
+      if (prods && prods.length > 0) {
+        setSalesPlayProducts(prods);
+      }
+      if (cats && cats.length > 0) {
+        setSalesPlayCategories(cats);
+      }
+
+      if (activeBusiness?.id) {
+        await syncAllSalesPlayCatalogToFirestore(activeBusiness.id);
+      }
+
+      toast.success(`Successfully synced ${prods.length} products & stock from SalesPlay!`, { id: toastId });
+    } catch (err: any) {
+      console.warn('Sync error:', err);
+      toast.error('Could not sync directly from SalesPlay. Using cached items.', { id: toastId });
+    } finally {
+      setRefreshingSalesPlay(false);
+    }
+  };
 
   // Load SalesPlay Products and Categories for quick search and scan
   useEffect(() => {
@@ -885,26 +986,57 @@ function PurchaseEntryForm({
       }
 
       // 5. SalesPlay Stock Sync
-      const salesPlayItems = billItems.filter(i => i.productId && i.productId.length > 5);
-      if (salesPlayItems.length > 0) {
+      // Match and resolve real SalesPlay product ID for each bill item
+      const resolvedItems: { productId: string; quantityToAdd: number; name: string }[] = [];
+      for (const item of billItems) {
+        let pId = item.productId;
+        if (!pId || pId.length < 5 || pId.startsWith('item_')) {
+          const found = salesPlayProducts.find(p => 
+            (item.barcode && p.barcode && p.barcode.trim() === item.barcode.trim()) ||
+            (item.productCode && p.product_code && p.product_code.trim() === item.productCode.trim()) ||
+            (item.name && p.product_name && p.product_name.trim().toLowerCase() === item.name.trim().toLowerCase())
+          );
+          if (found && found.id) {
+            pId = found.id;
+          }
+        }
+
+        if (pId && pId.length > 5 && !pId.startsWith('item_') && !pId.startsWith('sp_')) {
+          resolvedItems.push({
+            productId: pId,
+            quantityToAdd: Number(item.quantity) || 1,
+            name: item.name,
+          });
+        }
+      }
+
+      if (resolvedItems.length > 0) {
         try {
           const spSettings = await getSalesPlaySettings(activeBusiness.id);
           const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[selectedBranchId])
             || spSettings.selectedShopId
             || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
 
-          const updateItems = salesPlayItems.map(i => ({
-            productId: i.productId!,
-            quantityToAdd: Number(i.quantity) || 1,
+          const updateItems = resolvedItems.map(i => ({
+            productId: i.productId,
+            quantityToAdd: i.quantityToAdd,
           }));
 
           const spResult = await updateSalesPlayInventory(mappedShop, updateItems, spSettings.apiToken);
           if (spResult.success) {
-            await updateDoc(docRef, { syncedToSalesPlay: true, salesPlayShopId: mappedShop });
-            toast.success(`SalesPlay inventory updated (+${salesPlayItems.length} products stock)!`);
+            await updateDoc(docRef, { 
+              syncedToSalesPlay: true, 
+              salesPlayShopId: mappedShop,
+              salesPlayUpdatedCount: spResult.updatedCount 
+            });
+            toast.success(`SalesPlay POS stock gained (+${spResult.updatedCount} items)!`);
+          } else {
+            console.warn('SalesPlay stock update failed:', spResult.message);
+            toast.warning(`Bill saved, but SalesPlay stock update notice: ${spResult.message}`);
           }
-        } catch (spErr) {
+        } catch (spErr: any) {
           console.warn('SalesPlay inventory update notice:', spErr);
+          toast.warning(`Bill saved, but SalesPlay stock sync notice: ${spErr?.message || 'Network issue'}`);
         }
       }
 
@@ -1064,13 +1196,27 @@ function PurchaseEntryForm({
       {/* Itemized Lines (Editable with barcodes and scan input) */}
       <div className="space-y-4 bg-slate-950/40 p-4 rounded-2xl border border-slate-800">
         <div className="space-y-2">
-          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block">
-            Scan Barcode or Search Product to Add to Bill:
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 block">
+              Scan Barcode or Search Product to Add to Bill:
+            </label>
+            <button
+              type="button"
+              onClick={handleRefreshSalesPlayItems}
+              disabled={refreshingSalesPlay}
+              className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-950/40 hover:bg-emerald-900/50 px-2.5 py-1 rounded-xl border border-emerald-800/60 transition-all cursor-pointer shadow-sm active:scale-95"
+              title="Sync latest items and inventory stock directly from SalesPlay POS"
+            >
+              <RefreshCw size={12} className={cn(refreshingSalesPlay && "animate-spin")} />
+              <span>{refreshingSalesPlay ? "Syncing..." : "Sync SalesPlay Items"}</span>
+            </button>
+          </div>
           <ProductSearchAndScan
             products={combinedCatalogProducts}
             currency={currency}
             autoFocusScanner={true}
+            onSyncSalesPlay={onSyncSalesPlay || handleRefreshSalesPlayItems}
+            isSyncing={isSyncingSalesPlay || refreshingSalesPlay}
             onSelectProduct={(p) => {
               const isWeight = isWeightItem(p.product_name, p.measurement);
               const purchaseCost = (p.cost !== undefined && p.cost !== null && p.cost > 0)
@@ -1686,6 +1832,11 @@ function RecentLogs({
   businesses,
   isAllBusinessesSelected,
   suppliers,
+  salesPlayProducts = FALLBACK_SALESPLAY_PRODUCTS,
+  bankAccounts = [],
+  activeBusinessId,
+  onSyncSalesPlay,
+  isSyncingSalesPlay = false,
 }: {
   logs: PurchaseLog[];
   currency: string;
@@ -1693,10 +1844,16 @@ function RecentLogs({
   businesses: Business[];
   isAllBusinessesSelected: boolean;
   suppliers: Supplier[];
+  salesPlayProducts?: SalesPlayProduct[];
+  bankAccounts?: BankAccount[];
+  activeBusinessId?: string;
+  onSyncSalesPlay?: () => Promise<void>;
+  isSyncingSalesPlay?: boolean;
 }) {
   const { userProfile } = useBusiness();
   const isAdmin = userProfile?.role === 'admin' || auth.currentUser?.email === 'shomedesk@gmail.com';
   const [selectedLogForReceipt, setSelectedLogForReceipt] = useState<PurchaseLog | null>(null);
+  const [editingLog, setEditingLog] = useState<PurchaseLog | null>(null);
   const [showReportModal, setShowReportModal] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
@@ -1724,6 +1881,35 @@ function RecentLogs({
           });
         } catch (e) {
           console.warn('Failed to revert PO status:', e);
+        }
+      }
+
+      // 4. Revert stock in SalesPlay if items were synced
+      if (log.items && log.items.length > 0 && log.syncedToSalesPlay) {
+        try {
+          const spSettings = await getSalesPlaySettings(log.businessId || activeBusinessId || 'default');
+          const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[log.branchId])
+            || spSettings.selectedShopId
+            || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+          const revertItems = log.items
+            .map(i => {
+              const spId = (i.productId && i.productId.length > 10 && !i.productId.startsWith('item_'))
+                ? i.productId
+                : salesPlayProducts.find(p => p.barcode === i.barcode || p.product_name === i.name)?.id;
+              return {
+                productId: spId || '',
+                quantityDelta: -(Number(i.quantity) || 0),
+              };
+            })
+            .filter(i => i.productId && i.productId.length > 10 && i.quantityDelta !== 0);
+
+          if (revertItems.length > 0) {
+            await updateSalesPlayInventory(mappedShop, revertItems, spSettings.apiToken);
+            toast.info(`Reverted stock for ${revertItems.length} items in SalesPlay POS`);
+          }
+        } catch (spErr) {
+          console.warn('Notice reverting SalesPlay stock on delete:', spErr);
         }
       }
 
@@ -1805,7 +1991,7 @@ function RecentLogs({
                 </div>
               </div>
 
-              <div className="flex items-center gap-3 self-end sm:self-auto">
+              <div className="flex items-center gap-2.5 flex-wrap self-end sm:self-auto">
                 <div className="text-right mr-1">
                   <p className="text-sm font-black text-blue-400 font-mono">
                     {currency} {formatAmount(log.billAmount || (log as any).amount || 0, currency)}
@@ -1815,8 +2001,20 @@ function RecentLogs({
                   </p>
                 </div>
 
+                {/* Edit Purchase Bill Button */}
+                <button
+                  type="button"
+                  onClick={() => setEditingLog(log)}
+                  className="flex items-center gap-1.5 bg-amber-600/90 hover:bg-amber-500 text-white text-xs font-black py-2.5 px-3 rounded-xl shadow-md shadow-amber-950/40 cursor-pointer transition-all active:scale-95"
+                  title="Edit Purchase Bill items, quantities, & update SalesPlay stock"
+                >
+                  <Edit3 size={14} />
+                  <span>Edit Bill</span>
+                </button>
+
                 {/* View / Download Bill Receipt Button */}
                 <button
+                  type="button"
                   onClick={() => setSelectedLogForReceipt(log)}
                   className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-black py-2.5 px-3 rounded-xl shadow-md shadow-blue-950/40 cursor-pointer transition-all active:scale-95"
                   title="View and Download Bill PDF"
@@ -1828,6 +2026,7 @@ function RecentLogs({
                 {/* Admin Delete Button */}
                 {isAdmin && (
                   <button
+                    type="button"
                     onClick={() => handleDeleteLog(log)}
                     disabled={deletingId === log.id}
                     className="p-2.5 bg-slate-800 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-800 rounded-xl transition-all cursor-pointer"
@@ -1847,6 +2046,24 @@ function RecentLogs({
           </div>
         )}
       </div>
+
+      {/* Edit Purchase Bill Modal */}
+      {editingLog && (
+        <EditPurchaseBillModal
+          isOpen={!!editingLog}
+          onClose={() => setEditingLog(null)}
+          log={editingLog}
+          currency={currency}
+          suppliers={suppliers}
+          branches={branches}
+          salesPlayProducts={salesPlayProducts}
+          bankAccounts={bankAccounts}
+          activeBusinessId={activeBusinessId}
+          onSaved={() => setEditingLog(null)}
+          onSyncSalesPlay={onSyncSalesPlay}
+          isSyncingSalesPlay={isSyncingSalesPlay}
+        />
+      )}
 
       {/* Bill Receipt Modal */}
       {selectedLogForReceipt && (
