@@ -494,6 +494,11 @@ service cloud.firestore {
       allow delete: if isAuthenticated() && !isAccountant();
     }
 
+    match /productPackConfigs/{configId} {
+      allow read, write: if isAuthenticated();
+      allow delete: if isAdmin() || isDefaultAdmin();
+    }
+
     match /salesPlaySettings/{businessId} {
       allow read, write: if isAuthenticated();
       allow delete: if isAdmin() || isDefaultAdmin();

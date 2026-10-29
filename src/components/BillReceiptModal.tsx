@@ -155,10 +155,36 @@ export function BillReceiptModal({
                             <span className="text-slate-400 italic text-[10px]">-</span>
                           )}
                         </td>
-                        <td className="py-2 px-3 text-right font-bold font-mono">
-                          {Number(item.quantity || 1).toFixed(3)} {item.unit || 'pcs'}
+                        <td className="py-2 px-3 text-right">
+                          {item.orderMode === 'pack' && item.packCount ? (
+                            <div className="flex flex-col items-end">
+                              <span className="font-bold text-xs text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded">
+                                📦 {item.packCount} Packs ({item.piecesPerPack || 24} pcs/pk)
+                              </span>
+                              <span className="text-[10px] font-mono text-slate-500 mt-0.5">
+                                = {item.quantity} pcs total
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="font-bold font-mono">
+                              {Number(item.quantity || 1).toFixed(item.unit === 'kg' ? 3 : 0)} {item.unit || 'pcs'}
+                            </span>
+                          )}
                         </td>
-                        <td className="py-2 px-3 text-right font-mono">{formatAmount(item.unitPrice, currency)}</td>
+                        <td className="py-2 px-3 text-right">
+                          {item.orderMode === 'pack' && item.packPrice ? (
+                            <div className="flex flex-col items-end">
+                              <span className="font-bold text-xs text-slate-900">
+                                {formatAmount(item.packPrice, currency)}/pk
+                              </span>
+                              <span className="text-[10px] text-slate-500">
+                                ({formatAmount(item.unitPrice, currency)}/pc)
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="font-mono">{formatAmount(item.unitPrice, currency)}</span>
+                          )}
+                        </td>
                         <td className="py-2 px-3 text-right font-black font-mono">
                           {formatAmount(item.totalPrice || item.quantity * item.unitPrice, currency)}
                         </td>

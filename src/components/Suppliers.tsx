@@ -69,6 +69,13 @@ import {
   saveSupplierProductsFromBill
 } from '@/src/services/supplierProductService';
 import {
+  getProductPackConfig,
+  saveProductPackConfig,
+  preloadBusinessPackConfigs,
+  buildItemFromProduct,
+  buildCustomItemWithBarcode
+} from '@/src/services/productPackService';
+import {
   updateSalesPlayInventory,
   getSalesPlaySettings,
   fetchSalesPlayProductsWithInventory,
@@ -523,6 +530,13 @@ function PurchaseEntryForm({
     };
   }, [formData.supplierId, activeBusiness?.id]);
 
+  // Preload saved product pack configurations for the active business
+  useEffect(() => {
+    if (activeBusiness?.id) {
+      preloadBusinessPackConfigs(activeBusiness.id);
+    }
+  }, [activeBusiness?.id]);
+
   // Import all products from this supplier's profile catalog into the current bill
   const handleImportAllSupplierProducts = () => {
     if (supplierProducts.length === 0) {
@@ -532,8 +546,41 @@ function PurchaseEntryForm({
 
     const newItems: PurchaseOrderItem[] = supplierProducts.map((sp, idx) => {
       const isWeight = sp.unit === 'kg' || isWeightItem(sp.productName);
-      const defaultQty = isWeight ? 1.000 : 1;
       const unitCost = Number(sp.lastCost) || 0;
+
+      if (isWeight) {
+        const defaultQty = 1.000;
+        return {
+          id: `item_${Date.now()}_${idx}`,
+          productId: sp.productId || '',
+          productCode: sp.productCode || '',
+          name: sp.productName,
+          barcode: sp.barcode || '',
+          category: sp.category || 'General',
+          unit: 'kg',
+          orderMode: 'pcs',
+          quantity: defaultQty,
+          unitPrice: unitCost,
+          salesPrice: Number(sp.salesPrice) || 0,
+          totalPrice: Math.round(defaultQty * unitCost * 1000) / 1000,
+        };
+      }
+
+      // Non-weight: default to pack mode and load remembered pieces per pack
+      const packConfig = getProductPackConfig(activeBusiness?.id || 'default', {
+        productId: sp.productId,
+        productCode: sp.productCode,
+        barcode: sp.barcode,
+        name: sp.productName,
+      });
+
+      const piecesPerPack = sp.piecesPerPack || packConfig?.piecesPerPack || 24;
+      const packPrice = sp.lastPackPrice || packConfig?.packPrice || Math.round(unitCost * piecesPerPack * 1000) / 1000;
+      const effectiveUnitCost = piecesPerPack > 0 && packPrice > 0 ? Math.round((packPrice / piecesPerPack) * 10000) / 10000 : unitCost;
+      const packCount = 1;
+      const totalQty = Math.round(packCount * piecesPerPack * 1000) / 1000;
+      const totalPrice = Math.round(packCount * packPrice * 1000) / 1000;
+
       return {
         id: `item_${Date.now()}_${idx}`,
         productId: sp.productId || '',
@@ -541,11 +588,15 @@ function PurchaseEntryForm({
         name: sp.productName,
         barcode: sp.barcode || '',
         category: sp.category || 'General',
-        unit: (sp.unit as any) || (isWeight ? 'kg' : 'pcs'),
-        quantity: defaultQty,
-        unitPrice: unitCost,
+        unit: 'pack',
+        orderMode: 'pack',
+        packCount,
+        piecesPerPack,
+        packPrice,
+        quantity: totalQty,
+        unitPrice: effectiveUnitCost,
         salesPrice: Number(sp.salesPrice) || 0,
-        totalPrice: Math.round(defaultQty * unitCost * 1000) / 1000,
+        totalPrice,
       };
     });
 
@@ -646,6 +697,20 @@ function PurchaseEntryForm({
     updated[index] = current;
     setBillItems(updated);
     recalcTotal(updated);
+
+    // Automatically save pack config so the user NEVER has to re-type piecesPerPack or rate again!
+    if (field === 'piecesPerPack' || field === 'orderMode' || field === 'packPrice') {
+      saveProductPackConfig(activeBusiness?.id || 'default', {
+        productId: current.productId,
+        productCode: current.productCode,
+        barcode: current.barcode,
+        name: current.name,
+        piecesPerPack: current.piecesPerPack,
+        orderMode: current.orderMode,
+        packPrice: current.packPrice,
+        unitPrice: current.unitPrice,
+      });
+    }
   };
 
   const handleRemoveBillItem = (index: number) => {
@@ -720,6 +785,10 @@ function PurchaseEntryForm({
           barcode: (i.barcode || '').trim(),
           category: i.category || '',
           unit: i.unit || 'pcs',
+          orderMode: i.orderMode || (i.unit === 'kg' ? 'pcs' : 'pack'),
+          packCount: i.packCount,
+          piecesPerPack: i.piecesPerPack,
+          packPrice: i.packPrice,
           quantity: Number(i.quantity) || 1,
           unitPrice: Number(i.unitPrice) || 0,
           salesPrice: Number(i.salesPrice) || 0,
@@ -1004,55 +1073,47 @@ function PurchaseEntryForm({
             autoFocusScanner={true}
             onSelectProduct={(p) => {
               const isWeight = isWeightItem(p.product_name, p.measurement);
-              const defaultUnit: 'kg' | 'pcs' = isWeight ? 'kg' : 'pcs';
-              const defaultQty = isWeight ? 1.000 : 1;
               const purchaseCost = (p.cost !== undefined && p.cost !== null && p.cost > 0)
                 ? p.cost
                 : (p.last_purchase_cost || 0);
 
-              const existingIdx = billItems.findIndex(i => i.productId === p.id);
+              const existingIdx = billItems.findIndex(i => (p.id && i.productId === p.id) || (p.barcode && i.barcode === p.barcode));
               if (existingIdx >= 0) {
                 const updated = [...billItems];
-                const addQty = isWeight ? 1.000 : 1;
-                updated[existingIdx].quantity = Math.round((Number(updated[existingIdx].quantity) + addQty) * 1000) / 1000;
-                updated[existingIdx].totalPrice = Math.round(Number(updated[existingIdx].quantity) * Number(updated[existingIdx].unitPrice) * 1000) / 1000;
+                const item = updated[existingIdx];
+                if (item.orderMode === 'pack') {
+                  const newPackCount = (Number(item.packCount) || 1) + 1;
+                  const pPerPack = Number(item.piecesPerPack) || 24;
+                  item.packCount = newPackCount;
+                  item.quantity = Math.round(newPackCount * pPerPack * 1000) / 1000;
+                  item.totalPrice = Math.round(newPackCount * (Number(item.packPrice) || 0) * 1000) / 1000;
+                  toast.info(`Increased "${p.product_name}" to ${newPackCount} Packs (= ${item.quantity} pcs)`);
+                } else {
+                  const addQty = isWeight ? 1.000 : 1;
+                  item.quantity = Math.round((Number(item.quantity) + addQty) * 1000) / 1000;
+                  item.totalPrice = Math.round(Number(item.quantity) * Number(item.unitPrice) * 1000) / 1000;
+                  toast.info(`Increased "${p.product_name}" quantity to ${toStrictDecimal3(item.quantity)} ${item.unit || 'pcs'}`);
+                }
                 setBillItems(updated);
                 recalcTotal(updated);
-                toast.info(`Increased "${p.product_name}" quantity to ${toStrictDecimal3(updated[existingIdx].quantity)} ${updated[existingIdx].unit || 'pcs'}`);
               } else {
-                const newItem: PurchaseOrderItem = {
-                  id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
-                  productId: p.id,
-                  productCode: p.product_code,
-                  name: p.product_name,
-                  barcode: p.barcode || p.product_code,
-                  category: p.category,
-                  unit: defaultUnit,
-                  quantity: defaultQty,
-                  unitPrice: purchaseCost,
-                  salesPrice: p.price || 0,
-                  totalPrice: Math.round(defaultQty * purchaseCost * 1000) / 1000,
-                  currentStock: p.in_stock || 0,
-                  measurement: p.measurement,
-                };
+                const newItem = buildItemFromProduct(p, activeBusiness?.id || 'default', purchaseCost);
                 const updated = [...billItems, newItem];
                 setBillItems(updated);
                 recalcTotal(updated);
+                if (newItem.orderMode === 'pack') {
+                  toast.success(`Added "${p.product_name}" (📦 ${newItem.packCount} Pack × ${newItem.piecesPerPack} pcs = ${newItem.quantity} pcs)`);
+                } else {
+                  toast.success(`Added "${p.product_name}"`);
+                }
               }
             }}
             onAddCustomWithBarcode={(scannedBarcode) => {
-              const newItem: PurchaseOrderItem = {
-                id: `item_${Date.now()}`,
-                name: '',
-                barcode: scannedBarcode,
-                unit: 'pcs',
-                quantity: 1,
-                unitPrice: 0,
-                totalPrice: 0,
-              };
+              const newItem = buildCustomItemWithBarcode(scannedBarcode, activeBusiness?.id || 'default');
               const updated = [...billItems, newItem];
               setBillItems(updated);
               recalcTotal(updated);
+              toast.success(`Added barcode ${scannedBarcode} (📦 Pack Mode default, ${newItem.piecesPerPack} pcs/pack)`);
             }}
           />
         </div>

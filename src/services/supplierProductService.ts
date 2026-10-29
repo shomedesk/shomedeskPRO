@@ -115,6 +115,9 @@ export async function saveSupplierProductsFromBill(
       if (item.productCode) payload.productCode = item.productCode;
       if (item.barcode) payload.barcode = item.barcode.trim();
       if (item.salesPrice) payload.salesPrice = Number(item.salesPrice) || 0;
+      if (item.orderMode) payload.orderMode = item.orderMode;
+      if (item.piecesPerPack) payload.piecesPerPack = Number(item.piecesPerPack) || 24;
+      if (item.packPrice) payload.lastPackPrice = Number(item.packPrice) || 0;
 
       await setDoc(docRef, payload, { merge: true });
     });

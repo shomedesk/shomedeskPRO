@@ -117,6 +117,24 @@ export interface SupplierProduct {
   timesPurchased?: number;
   createdAt?: any;
   updatedAt?: any;
+  // Pack / Carton settings
+  orderMode?: 'pcs' | 'pack';
+  piecesPerPack?: number;
+  lastPackPrice?: number;
+}
+
+export interface ProductPackConfig {
+  id?: string;
+  businessId: string;
+  productId?: string;
+  productCode?: string;
+  barcode?: string;
+  productName: string;
+  piecesPerPack: number;
+  orderMode: 'pcs' | 'pack';
+  packPrice?: number;
+  unitPrice?: number;
+  updatedAt?: any;
 }
 
 export interface ExpenseItem {
