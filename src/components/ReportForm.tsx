@@ -14,7 +14,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { MonthlyStatementModal } from './MonthlyStatementModal';
 import { ExpensesBreakdownModal } from './ExpensesBreakdownModal';
 import { DailyClosingStatementModal } from './DailyClosingStatementModal';
-import { syncSalesPlaySalesToFirestore } from '@/src/services/salesplay';
+import { syncSalesPlaySalesToFirestore, getSalesPlaySettings, saveSalesPlaySettings } from '@/src/services/salesplay';
 import { generateDailyReportPdf } from '@/src/lib/pdfUtils';
 
 export default function ReportForm() {
@@ -89,6 +89,8 @@ export default function ReportForm() {
     bankExpense: 0,
     bankToCash: 0,
     cashToBank: 0,
+    selectedBankId: '',
+    cardBankId: '',
     note: '',
   });
   const [editSaving, setEditSaving] = useState(false);
@@ -147,25 +149,65 @@ export default function ReportForm() {
     );
   }, [bankAccounts, selectedBusiness?.id, selectedBranch?.id, selectedService?.id]);
 
+  // Load configured preset bank accounts from salesPlaySettings or branch accounts
   useEffect(() => {
-    if (branchBankAccounts.length > 0) {
+    if (branchBankAccounts.length === 0 || !selectedBusiness) return;
+
+    let isMounted = true;
+    async function loadPresets() {
       const defaultBankId = branchBankAccounts[0].id;
-      setSelectedBankId(prev => (prev && branchBankAccounts.some(b => b.id === prev) ? prev : defaultBankId));
-      setCardBankId(prev => (prev && branchBankAccounts.some(b => b.id === prev) ? prev : (branchBankAccounts[1]?.id || defaultBankId)));
+      let onlinePresetId = defaultBankId;
+      let cardPresetId = branchBankAccounts[1]?.id || defaultBankId;
 
-      setCashToBankRows(prev => {
-        const needsUpdate = prev.some(r => !r.bankId);
-        if (!needsUpdate) return prev;
-        return prev.map(r => r.bankId ? r : { ...r, bankId: defaultBankId });
-      });
+      try {
+        const settings = await getSalesPlaySettings(selectedBusiness!.id);
+        if (settings?.defaultOnlineBankId && branchBankAccounts.some(b => b.id === settings.defaultOnlineBankId)) {
+          onlinePresetId = settings.defaultOnlineBankId;
+        }
+        if (settings?.defaultCardBankId && branchBankAccounts.some(b => b.id === settings.defaultCardBankId)) {
+          cardPresetId = settings.defaultCardBankId;
+        }
+      } catch (err) {
+        console.warn('Preset bank load warning:', err);
+      }
 
-      setBankToCashRows(prev => {
-        const needsUpdate = prev.some(r => !r.bankId);
-        if (!needsUpdate) return prev;
-        return prev.map(r => r.bankId ? r : { ...r, bankId: defaultBankId });
-      });
+      if (isMounted) {
+        setSelectedBankId(prev => (prev && branchBankAccounts.some(b => b.id === prev) ? prev : onlinePresetId));
+        setCardBankId(prev => (prev && branchBankAccounts.some(b => b.id === prev) ? prev : cardPresetId));
+
+        setCashToBankRows(prev => {
+          const needsUpdate = prev.some(r => !r.bankId);
+          if (!needsUpdate) return prev;
+          return prev.map(r => r.bankId ? r : { ...r, bankId: onlinePresetId });
+        });
+
+        setBankToCashRows(prev => {
+          const needsUpdate = prev.some(r => !r.bankId);
+          if (!needsUpdate) return prev;
+          return prev.map(r => r.bankId ? r : { ...r, bankId: onlinePresetId });
+        });
+      }
     }
-  }, [branchBankAccounts]);
+
+    loadPresets();
+    return () => { isMounted = false; };
+  }, [branchBankAccounts, selectedBusiness?.id]);
+
+  // Quick 1-click preset saver for active bank routing
+  const handleSaveBankPresets = async () => {
+    if (!selectedBusiness) return;
+    try {
+      const current = await getSalesPlaySettings(selectedBusiness.id);
+      await saveSalesPlaySettings({
+        ...current,
+        defaultOnlineBankId: selectedBankId,
+        defaultCardBankId: cardBankId || selectedBankId,
+      });
+      toast.success('Default bank routing preset saved for Online and Card payments!');
+    } catch (err) {
+      toast.error('Failed to save bank preset settings');
+    }
+  };
 
   useEffect(() => {
     if (!selectedBusiness) return;
@@ -514,6 +556,8 @@ export default function ReportForm() {
         bankToBankRows: bankToBankRows.filter(r => r.amount > 0),
         closingCash: toStrictDecimal3(closingCash),
         closingBank: toStrictDecimal3(closingBank),
+        selectedBankId: selectedBankId || undefined,
+        cardBankId: (cardBankId || selectedBankId) || undefined,
         expenseItems: expenseItems.length > 0 ? expenseItems : undefined,
         note: formData.note || '',
         createdAt: serverTimestamp(),
@@ -569,6 +613,7 @@ export default function ReportForm() {
         branchId: selectedBranch?.id || 'global',
         serviceId: selectedService?.id || 'global',
         userId: auth.currentUser.uid,
+        reportId: reportRef.id,
         date: new Date().toISOString(),
         createdAt: serverTimestamp(),
         isFromReport: true,
@@ -816,16 +861,34 @@ export default function ReportForm() {
         console.warn('Expense cleanup warning:', expErr);
       }
 
-      // 3. Reverse bank balance if applicable
-      const bankNetChange = (Number(report.bankSale) || 0) + (Number(report.cashToBank) || 0) - (Number(report.bankExpense) || 0) - (Number(report.bankToCash) || 0);
-      if (bankNetChange !== 0 && selectedBankId) {
-        try {
-          await updateDoc(doc(db, 'bankAccounts', selectedBankId), {
-            balance: increment(-bankNetChange)
-          });
-        } catch (bErr) {
-          console.warn('Bank reverse warning:', bErr);
-        }
+      // 3. Reverse bank balances accurately for both Online and Card banks
+      const onlineBankId = report.selectedBankId || selectedBankId || branchBankAccounts[0]?.id;
+      const cardBankId = report.cardBankId || onlineBankId;
+
+      const repOnlineSale = Number(report.onlineSale) || 0;
+      const repCardSale = Number(report.cardSale) || 0;
+      const repBankSale = Number(report.bankSale) || 0;
+      const repCashToBank = Number(report.cashToBank) || 0;
+      const repBankToCash = Number(report.bankToCash) || 0;
+      const repBankExpense = Number(report.bankExpense) || 0;
+
+      if (repOnlineSale > 0 && onlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', onlineBankId), { balance: increment(-repOnlineSale) }).catch(() => {});
+      }
+      if (repCardSale > 0 && cardBankId) {
+        await updateDoc(doc(db, 'bankAccounts', cardBankId), { balance: increment(-repCardSale) }).catch(() => {});
+      }
+      if (repOnlineSale === 0 && repCardSale === 0 && repBankSale > 0 && onlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', onlineBankId), { balance: increment(-repBankSale) }).catch(() => {});
+      }
+      if (repCashToBank > 0 && onlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', onlineBankId), { balance: increment(-repCashToBank) }).catch(() => {});
+      }
+      if (repBankToCash > 0 && onlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', onlineBankId), { balance: increment(repBankToCash) }).catch(() => {});
+      }
+      if (repBankExpense > 0 && onlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', onlineBankId), { balance: increment(repBankExpense) }).catch(() => {});
       }
 
       // 4. Delete related transactions created from report
@@ -833,15 +896,26 @@ export default function ReportForm() {
         const transQ = query(
           collection(db, 'transactions'),
           where('businessId', '==', report.businessId),
-          where('isFromReport', '==', true)
+          where('reportId', '==', report.id)
         );
         const transSnap = await getDocs(transQ);
-        const repDateStr = report.date?.slice(0, 10);
-        const toDelete = transSnap.docs.filter(d => {
-          const t = d.data();
-          return t.date && t.date.slice(0, 10) === repDateStr;
-        });
-        await Promise.all(toDelete.map(d => deleteDoc(doc(db, 'transactions', d.id))));
+        let docsToDelete = transSnap.docs;
+
+        if (docsToDelete.length === 0) {
+          const legacyQ = query(
+            collection(db, 'transactions'),
+            where('businessId', '==', report.businessId),
+            where('isFromReport', '==', true)
+          );
+          const legacySnap = await getDocs(legacyQ);
+          const repDateStr = report.date?.slice(0, 10);
+          docsToDelete = legacySnap.docs.filter(d => {
+            const t = d.data();
+            return t.date && t.date.slice(0, 10) === repDateStr;
+          });
+        }
+
+        await Promise.all(docsToDelete.map(d => deleteDoc(doc(db, 'transactions', d.id))));
       } catch (tErr) {
         console.warn('Transactions cleanup warning:', tErr);
       }
@@ -874,6 +948,7 @@ export default function ReportForm() {
       dateStr = format(new Date(), 'yyyy-MM-dd');
     }
 
+    const defaultBank = branchBankAccounts[0]?.id || selectedBankId || '';
     setEditFormData({
       date: dateStr,
       openingCash: report.openingCash || 0,
@@ -886,40 +961,258 @@ export default function ReportForm() {
       bankExpense: report.bankExpense || 0,
       bankToCash: report.bankToCash || 0,
       cashToBank: report.cashToBank || 0,
+      selectedBankId: report.selectedBankId || selectedBankId || defaultBank,
+      cardBankId: report.cardBankId || cardBankId || report.selectedBankId || selectedBankId || defaultBank,
       note: report.note || '',
     });
   };
 
   const editElectronicSales = (Number(editFormData.cardSale) > 0 || Number(editFormData.onlineSale) > 0)
-    ? (Number(editFormData.cardSale) + Number(editFormData.onlineSale))
+    ? toStrictDecimal3(Number(editFormData.cardSale) + Number(editFormData.onlineSale))
     : Number(editFormData.bankSale);
-  const editClosingCash = editFormData.openingCash + editFormData.cashSale + editFormData.bankToCash - editFormData.cashExpense - editFormData.cashToBank;
-  const editClosingBank = editFormData.openingBank + editElectronicSales + editFormData.cashToBank - editFormData.bankExpense - editFormData.bankToCash;
+  const editClosingCash = toStrictDecimal3(editFormData.openingCash + editFormData.cashSale + editFormData.bankToCash - editFormData.cashExpense - editFormData.cashToBank);
+  const editClosingBank = toStrictDecimal3(editFormData.openingBank + editElectronicSales + editFormData.cashToBank - editFormData.bankExpense - editFormData.bankToCash);
 
-  // Admin Save Edited Report
+  // Admin Save Edited Report (Synchronizes Bank Accounts, Cash & Transactions across full system)
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingReport?.id || !isAdmin) return;
 
     setEditSaving(true);
     try {
-      const updatedFields = {
-        date: new Date(editFormData.date).toISOString(),
+      const newCashSale = Number(editFormData.cashSale) || 0;
+      const newOnlineSale = Number(editFormData.onlineSale) || 0;
+      const newCardSale = Number(editFormData.cardSale) || 0;
+      const newElectronicSales = (newCardSale > 0 || newOnlineSale > 0)
+        ? toStrictDecimal3(newCardSale + newOnlineSale)
+        : Number(editFormData.bankSale) || 0;
+      const newTotalSale = toStrictDecimal3(newCashSale + (newCardSale > 0 || newOnlineSale > 0 ? (newCardSale + newOnlineSale) : newElectronicSales));
+      
+      const newCashExpense = Number(editFormData.cashExpense) || 0;
+      const newBankExpense = Number(editFormData.bankExpense) || 0;
+      const newTotalExpense = toStrictDecimal3(newCashExpense + newBankExpense);
+      const cogs = Number(editingReport.cogs) || 0;
+      const newGrossProfit = toStrictDecimal3(newTotalSale - cogs);
+      const newNetProfit = toStrictDecimal3(newGrossProfit - newTotalExpense);
+
+      const newBankToCash = Number(editFormData.bankToCash) || 0;
+      const newCashToBank = Number(editFormData.cashToBank) || 0;
+      const newSelectedBankId = editFormData.selectedBankId || selectedBankId || branchBankAccounts[0]?.id || '';
+      const newCardBankId = editFormData.cardBankId || cardBankId || newSelectedBankId;
+
+      const newDateIso = new Date(editFormData.date).toISOString();
+
+      // Step 1: Reverse OLD bank account adjustments from editingReport
+      const oldOnlineBankId = editingReport.selectedBankId || selectedBankId || branchBankAccounts[0]?.id || '';
+      const oldCardBankId = editingReport.cardBankId || oldOnlineBankId;
+      const oldOnlineSale = Number(editingReport.onlineSale) || 0;
+      const oldCardSale = Number(editingReport.cardSale) || 0;
+      const oldBankSale = Number(editingReport.bankSale) || 0;
+      const oldCashToBank = Number(editingReport.cashToBank) || 0;
+      const oldBankToCash = Number(editingReport.bankToCash) || 0;
+      const oldBankExpense = Number(editingReport.bankExpense) || 0;
+
+      if (oldOnlineSale > 0 && oldOnlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', oldOnlineBankId), { balance: increment(-oldOnlineSale) }).catch(() => {});
+      }
+      if (oldCardSale > 0 && oldCardBankId) {
+        await updateDoc(doc(db, 'bankAccounts', oldCardBankId), { balance: increment(-oldCardSale) }).catch(() => {});
+      }
+      if (oldOnlineSale === 0 && oldCardSale === 0 && oldBankSale > 0 && oldOnlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', oldOnlineBankId), { balance: increment(-oldBankSale) }).catch(() => {});
+      }
+      if (oldCashToBank > 0 && oldOnlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', oldOnlineBankId), { balance: increment(-oldCashToBank) }).catch(() => {});
+      }
+      if (oldBankToCash > 0 && oldOnlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', oldOnlineBankId), { balance: increment(oldBankToCash) }).catch(() => {});
+      }
+      if (oldBankExpense > 0 && oldOnlineBankId) {
+        await updateDoc(doc(db, 'bankAccounts', oldOnlineBankId), { balance: increment(oldBankExpense) }).catch(() => {});
+      }
+
+      // Step 2: Apply NEW bank account adjustments
+      if (newOnlineSale > 0 && newSelectedBankId) {
+        await updateDoc(doc(db, 'bankAccounts', newSelectedBankId), { balance: increment(newOnlineSale) }).catch(() => {});
+      }
+      if (newCardSale > 0 && newCardBankId) {
+        await updateDoc(doc(db, 'bankAccounts', newCardBankId), { balance: increment(newCardSale) }).catch(() => {});
+      }
+      if (newOnlineSale === 0 && newCardSale === 0 && newElectronicSales > 0 && newSelectedBankId) {
+        await updateDoc(doc(db, 'bankAccounts', newSelectedBankId), { balance: increment(newElectronicSales) }).catch(() => {});
+      }
+      if (newCashToBank > 0 && newSelectedBankId) {
+        await updateDoc(doc(db, 'bankAccounts', newSelectedBankId), { balance: increment(newCashToBank) }).catch(() => {});
+      }
+      if (newBankToCash > 0 && newSelectedBankId) {
+        await updateDoc(doc(db, 'bankAccounts', newSelectedBankId), { balance: increment(-newBankToCash) }).catch(() => {});
+      }
+      if (newBankExpense > 0 && newSelectedBankId) {
+        await updateDoc(doc(db, 'bankAccounts', newSelectedBankId), { balance: increment(-newBankExpense) }).catch(() => {});
+      }
+
+      // Step 3: Delete OLD transactions for this report
+      try {
+        const transQ = query(
+          collection(db, 'transactions'),
+          where('businessId', '==', editingReport.businessId),
+          where('reportId', '==', editingReport.id)
+        );
+        const transSnap = await getDocs(transQ);
+        let docsToDelete = transSnap.docs;
+
+        if (docsToDelete.length === 0) {
+          const legacyQ = query(
+            collection(db, 'transactions'),
+            where('businessId', '==', editingReport.businessId),
+            where('isFromReport', '==', true)
+          );
+          const legacySnap = await getDocs(legacyQ);
+          const repDateStr = editingReport.date?.slice(0, 10);
+          docsToDelete = legacySnap.docs.filter(d => {
+            const t = d.data();
+            return t.date && t.date.slice(0, 10) === repDateStr;
+          });
+        }
+
+        await Promise.all(docsToDelete.map(d => deleteDoc(doc(db, 'transactions', d.id))));
+      } catch (tDelErr) {
+        console.warn('Failed to clean up old transactions during report edit:', tDelErr);
+      }
+
+      // Step 4: Create fresh NEW transactions linked to editingReport.id
+      const commonTx = {
+        businessId: editingReport.businessId,
+        ownerId: editingReport.ownerId,
+        branchId: editingReport.branchId || 'global',
+        serviceId: editingReport.serviceId || 'global',
+        userId: auth.currentUser?.uid || editingReport.managerId,
+        reportId: editingReport.id,
+        date: newDateIso,
+        createdAt: serverTimestamp(),
+        isFromReport: true,
+      };
+
+      const newTransactions: Partial<Transaction>[] = [];
+      const reportDateLabel = format(new Date(newDateIso), 'MMM dd');
+
+      if (newCashSale > 0) {
+        newTransactions.push({
+          ...commonTx,
+          type: 'income',
+          amount: newCashSale,
+          toAccount: 'cash',
+          category: 'Daily Cash Sale',
+          description: `Edited Report: ${reportDateLabel}`,
+        });
+      }
+      if (newOnlineSale > 0 && newSelectedBankId) {
+        newTransactions.push({
+          ...commonTx,
+          type: 'income',
+          amount: newOnlineSale,
+          toAccount: 'bank',
+          toBankId: newSelectedBankId,
+          category: 'Daily Online / Gateway Sale',
+          description: `Online Sale: ${reportDateLabel}`,
+        });
+      }
+      if (newCardSale > 0 && newCardBankId) {
+        newTransactions.push({
+          ...commonTx,
+          type: 'income',
+          amount: newCardSale,
+          toAccount: 'bank',
+          toBankId: newCardBankId,
+          category: 'Daily Card / POS Machine Sale',
+          description: `Card Machine Sale: ${reportDateLabel}`,
+        });
+      }
+      if (newOnlineSale === 0 && newCardSale === 0 && newElectronicSales > 0 && newSelectedBankId) {
+        newTransactions.push({
+          ...commonTx,
+          type: 'income',
+          amount: newElectronicSales,
+          toAccount: 'bank',
+          toBankId: newSelectedBankId,
+          category: 'Daily Bank Sale',
+          description: `Report Bank Sales: ${reportDateLabel}`,
+        });
+      }
+      if (newCashExpense > 0) {
+        newTransactions.push({
+          ...commonTx,
+          type: 'expense',
+          amount: newCashExpense,
+          fromAccount: 'cash',
+          category: 'Daily Cash Expense',
+          description: `Edited Report: ${reportDateLabel}`,
+        });
+      }
+      if (newBankExpense > 0 && newSelectedBankId) {
+        newTransactions.push({
+          ...commonTx,
+          type: 'expense',
+          amount: newBankExpense,
+          fromAccount: 'bank',
+          fromBankId: newSelectedBankId,
+          category: 'Daily Bank Expense',
+          description: `Edited Report: ${reportDateLabel}`,
+        });
+      }
+      if (newBankToCash > 0 && newSelectedBankId) {
+        newTransactions.push({
+          ...commonTx,
+          type: 'transfer',
+          amount: newBankToCash,
+          fromAccount: 'bank',
+          toAccount: 'cash',
+          fromBankId: newSelectedBankId,
+          category: 'Bank to Cash Withdrawal',
+          description: `Cash withdrawal from ${branchBankAccounts.find(b => b.id === newSelectedBankId)?.bankName || 'Bank'}`,
+        });
+      }
+      if (newCashToBank > 0 && newSelectedBankId) {
+        newTransactions.push({
+          ...commonTx,
+          type: 'transfer',
+          amount: newCashToBank,
+          fromAccount: 'cash',
+          toAccount: 'bank',
+          toBankId: newSelectedBankId,
+          category: 'Cash to Bank Deposit',
+          description: `Cash deposit into ${branchBankAccounts.find(b => b.id === newSelectedBankId)?.bankName || 'Bank'}`,
+        });
+      }
+
+      await Promise.all(newTransactions.map(t => addDoc(collection(db, 'transactions'), t)));
+
+      // Step 5: Update the DailyReport document with all fields
+      const updatedFields: Partial<DailyReport> = {
+        date: newDateIso,
         openingCash: Number(editFormData.openingCash) || 0,
         openingBank: Number(editFormData.openingBank) || 0,
-        cashSale: Number(editFormData.cashSale) || 0,
-        bankSale: Number(editFormData.bankSale) || 0,
-        cashExpense: Number(editFormData.cashExpense) || 0,
-        bankExpense: Number(editFormData.bankExpense) || 0,
-        bankToCash: Number(editFormData.bankToCash) || 0,
-        cashToBank: Number(editFormData.cashToBank) || 0,
+        cashSale: newCashSale,
+        onlineSale: newOnlineSale,
+        cardSale: newCardSale,
+        bankSale: newElectronicSales,
+        totalSale: newTotalSale,
+        grossProfit: newGrossProfit,
+        cashExpense: newCashExpense,
+        bankExpense: newBankExpense,
+        totalExpense: newTotalExpense,
+        netProfit: newNetProfit,
+        bankToCash: newBankToCash,
+        cashToBank: newCashToBank,
         closingCash: editClosingCash,
         closingBank: editClosingBank,
+        selectedBankId: newSelectedBankId || undefined,
+        cardBankId: newCardBankId || undefined,
         note: editFormData.note || '',
       };
 
       await updateDoc(doc(db, 'dailyReports', editingReport.id), updatedFields);
-      toast.success('Daily report updated successfully');
+      toast.success('Daily report, bank accounts, and transactions updated across full system!');
 
       // Update selected report if open in viewer
       if (selectedReport?.id === editingReport.id) {
@@ -1111,22 +1404,34 @@ export default function ReportForm() {
                   </div>
                 </div>
 
-                {/* Card Machine Settlement Account Selector if multiple bank accounts exist */}
-                {branchBankAccounts.length > 1 && (
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 p-3 bg-slate-950/60 rounded-xl border border-slate-800 text-xs">
-                    <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1.5">
-                      <CreditCard size={14} className="text-indigo-400" />
-                      Card Machine Settlement Bank:
-                    </span>
-                    <select
-                      value={cardBankId || selectedBankId}
-                      onChange={(e) => setCardBankId(e.target.value)}
-                      className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-xs text-white font-bold outline-none focus:border-indigo-500"
+                {/* Card Machine Settlement Account Selector & Default Preset Saver */}
+                {branchBankAccounts.length > 0 && (
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 p-3.5 bg-slate-950/70 rounded-2xl border border-slate-800 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1.5">
+                        <CreditCard size={14} className="text-indigo-400" />
+                        Card Settlement Bank:
+                      </span>
+                      <select
+                        value={cardBankId || selectedBankId}
+                        onChange={(e) => setCardBankId(e.target.value)}
+                        className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-xs text-white font-bold outline-none focus:border-indigo-500"
+                      >
+                        {branchBankAccounts.map(b => (
+                          <option key={b.id} value={b.id}>{b.bankName} - {b.accountName}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleSaveBankPresets}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-xl text-[11px] font-bold transition-all active:scale-95 cursor-pointer"
+                      title="Save current Online & Card bank accounts as default preset"
                     >
-                      {branchBankAccounts.map(b => (
-                        <option key={b.id} value={b.id}>{b.bankName} - {b.accountName}</option>
-                      ))}
-                    </select>
+                      <Save size={13} />
+                      <span>Save as Default Preset</span>
+                    </button>
                   </div>
                 )}
 
@@ -2166,6 +2471,40 @@ export default function ReportForm() {
                     icon={<CreditCard size={16} className="text-indigo-400" />}
                   />
                 </div>
+
+                {/* Bank Routing for Online & Card Sales in Edit Modal */}
+                {branchBankAccounts.length > 0 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-900/50 p-3 rounded-2xl border border-slate-800">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-blue-400 uppercase tracking-widest flex items-center gap-1.5">
+                        <Globe size={13} /> Online / Gateway Bank
+                      </label>
+                      <select
+                        value={editFormData.selectedBankId || selectedBankId}
+                        onChange={(e) => setEditFormData({ ...editFormData, selectedBankId: e.target.value })}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-2 text-xs text-white font-bold outline-none focus:border-blue-500"
+                      >
+                        {branchBankAccounts.map(b => (
+                          <option key={b.id} value={b.id}>{b.bankName} - {b.accountName}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-1.5">
+                        <CreditCard size={13} /> Card POS Machine Bank
+                      </label>
+                      <select
+                        value={editFormData.cardBankId || editFormData.selectedBankId || cardBankId || selectedBankId}
+                        onChange={(e) => setEditFormData({ ...editFormData, cardBankId: e.target.value })}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-2 text-xs text-white font-bold outline-none focus:border-indigo-500"
+                      >
+                        {branchBankAccounts.map(b => (
+                          <option key={b.id} value={b.id}>{b.bankName} - {b.accountName}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                )}
 
                 {/* Expenses & Transfers */}
                 <div className="grid grid-cols-2 gap-4">

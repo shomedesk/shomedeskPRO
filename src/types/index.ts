@@ -81,6 +81,7 @@ export interface Transaction {
   date: string;
   createdAt: any;
   isFromReport?: boolean;
+  reportId?: string; // Link to DailyReport document ID
 }
 
 export interface Supplier {

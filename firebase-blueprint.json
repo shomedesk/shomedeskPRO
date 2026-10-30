@@ -71,6 +71,7 @@
         "amount": { "type": "number" },
         "category": { "type": "string" },
         "description": { "type": "string" },
+        "reportId": { "type": "string" },
         "date": { "type": "string", "format": "date-time" }
       },
       "required": ["businessId", "branchId", "type", "amount", "date"]
@@ -87,6 +88,8 @@
         "openingCash": { "type": "number" },
         "openingBank": { "type": "number" },
         "cashSale": { "type": "number" },
+        "onlineSale": { "type": "number" },
+        "cardSale": { "type": "number" },
         "bankSale": { "type": "number" },
         "cashExpense": { "type": "number" },
         "bankExpense": { "type": "number" },
@@ -94,6 +97,8 @@
         "cashToBank": { "type": "number" },
         "closingCash": { "type": "number" },
         "closingBank": { "type": "number" },
+        "selectedBankId": { "type": "string" },
+        "cardBankId": { "type": "string" },
         "note": { "type": "string" }
       },
       "required": ["businessId", "branchId", "managerId", "date", "closingCash", "closingBank"]
