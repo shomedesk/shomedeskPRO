@@ -5,10 +5,10 @@ import { DailyReport, Transaction, ExpenseItem, PurchaseLog, TransferRow, BankTo
 import { useBusiness } from '@/src/contexts/BusinessContext';
 import { handleFirestoreError, OperationType } from '@/src/lib/firestore-utils';
 import { toast } from 'sonner';
-import { Save, Calculator, FileText, Wallet, Landmark, ArrowRightLeft, History, Calendar, Banknote, Plus, Eye, Edit2, Trash2, Printer, Download, ChevronLeft, ChevronRight, X, ShieldAlert, FileSpreadsheet, Receipt, ShoppingCart, RefreshCw, CreditCard, Globe } from 'lucide-react';
+import { Save, Calculator, FileText, Wallet, Landmark, ArrowRightLeft, History, Calendar, Banknote, Plus, Eye, Edit2, Trash2, Printer, Download, ChevronLeft, ChevronRight, X, ShieldAlert, FileSpreadsheet, Receipt, ShoppingCart, RefreshCw, CreditCard, Globe, TrendingUp } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { formatAmount, toStrictDecimal3 } from '@/src/lib/currencyUtils';
-import { format, parseISO, startOfDay, endOfDay } from 'date-fns';
+import { format, parseISO, startOfDay, endOfDay, subDays } from 'date-fns';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { MonthlyStatementModal } from './MonthlyStatementModal';
@@ -30,11 +30,13 @@ export default function ReportForm() {
     onlineSale: 0,
     cardSale: 0,
     bankSale: 0,
+    cogs: 0, // Cost of Goods Sold from SalesPlay POS or manual entry
     cashExpense: 0,
     bankExpense: 0,
     note: '',
   });
   const [selectedBankId, setSelectedBankId] = useState('');
+  const [onlineBankId, setOnlineBankId] = useState('');
   const [cardBankId, setCardBankId] = useState('');
   const [reports, setReports] = useState<DailyReport[]>([]);
   const [loading, setLoading] = useState(false);
@@ -85,6 +87,7 @@ export default function ReportForm() {
     onlineSale: 0,
     cardSale: 0,
     bankSale: 0,
+    cogs: 0,
     cashExpense: 0,
     bankExpense: 0,
     bankToCash: 0,
@@ -107,13 +110,25 @@ export default function ReportForm() {
     const toastId = toast.loading('Connecting to SalesPlay POS and importing today\'s sales...');
     try {
       const today = new Date();
-      const res = await syncSalesPlaySalesToFirestore({
+      // First try strict today
+      let res = await syncSalesPlaySalesToFirestore({
         businessId: selectedBusiness.id,
         ownerId: selectedBusiness.ownerId || auth.currentUser?.uid || '',
         branchId: selectedBranch?.id || 'main',
         startDate: startOfDay(today),
         endDate: endOfDay(today),
       });
+
+      // If strict today returned 0 receipts, check last 24 hours to cover timezone boundaries
+      if (!res.success || res.importedCount === 0) {
+        res = await syncSalesPlaySalesToFirestore({
+          businessId: selectedBusiness.id,
+          ownerId: selectedBusiness.ownerId || auth.currentUser?.uid || '',
+          branchId: selectedBranch?.id || 'main',
+          startDate: subDays(today, 1),
+          endDate: endOfDay(today),
+        });
+      }
 
       if (res.success && res.importedCount > 0) {
         setFormData(prev => ({
@@ -122,9 +137,10 @@ export default function ReportForm() {
           onlineSale: res.onlineTotal,
           cardSale: res.cardTotal,
           bankSale: toStrictDecimal3(res.cardTotal + res.onlineTotal),
+          cogs: res.totalCogs,
         }));
         toast.success(
-          `Imported ${res.importedCount} receipts from SalesPlay POS! Cash: ${currency} ${formatAmount(res.cashTotal, currency)} | Online: ${currency} ${formatAmount(res.onlineTotal, currency)} | Card: ${currency} ${formatAmount(res.cardTotal, currency)}`,
+          `Imported ${res.importedCount} receipts from SalesPlay POS! Total: ${currency} ${formatAmount(res.totalSales, currency)} | COGS: ${currency} ${formatAmount(res.totalCogs, currency)} | Gross Profit: ${currency} ${formatAmount(res.grossProfit, currency)}`,
           { id: toastId, duration: 6000 }
         );
       } else {
@@ -143,10 +159,17 @@ export default function ReportForm() {
   const PAGE_SIZE = 10;
 
   const branchBankAccounts = useMemo(() => {
-    return bankAccounts.filter(ba => 
-      ba.businessId === selectedBusiness?.id && 
-      (selectedBranch ? ba.branchId === selectedBranch.id : (selectedService ? ba.serviceId === selectedService.id : true))
+    const list = bankAccounts.filter(ba => 
+      (ba.businessId === selectedBusiness?.id || ba.businessId === 'global' || !ba.businessId) && 
+      (selectedBranch 
+        ? (ba.branchId === selectedBranch.id || ba.branchId === 'global' || !ba.branchId)
+        : (selectedService ? (ba.serviceId === selectedService.id || ba.serviceId === 'global' || !ba.serviceId) : true))
     );
+    // If strict branch filter produces empty list, fallback to any bank accounts of the business
+    if (list.length === 0 && bankAccounts.length > 0) {
+      return bankAccounts.filter(ba => ba.businessId === selectedBusiness?.id || ba.businessId === 'global' || !ba.businessId);
+    }
+    return list;
   }, [bankAccounts, selectedBusiness?.id, selectedBranch?.id, selectedService?.id]);
 
   // Load configured preset bank accounts from salesPlaySettings or branch accounts
@@ -172,6 +195,7 @@ export default function ReportForm() {
       }
 
       if (isMounted) {
+        setOnlineBankId(prev => (prev && branchBankAccounts.some(b => b.id === prev) ? prev : onlinePresetId));
         setSelectedBankId(prev => (prev && branchBankAccounts.some(b => b.id === prev) ? prev : onlinePresetId));
         setCardBankId(prev => (prev && branchBankAccounts.some(b => b.id === prev) ? prev : cardPresetId));
 
@@ -198,10 +222,12 @@ export default function ReportForm() {
     if (!selectedBusiness) return;
     try {
       const current = await getSalesPlaySettings(selectedBusiness.id);
+      const onlineToSave = onlineBankId || selectedBankId || branchBankAccounts[0]?.id || '';
+      const cardToSave = cardBankId || onlineToSave;
       await saveSalesPlaySettings({
         ...current,
-        defaultOnlineBankId: selectedBankId,
-        defaultCardBankId: cardBankId || selectedBankId,
+        defaultOnlineBankId: onlineToSave,
+        defaultCardBankId: cardToSave,
       });
       toast.success('Default bank routing preset saved for Online and Card payments!');
     } catch (err) {
@@ -485,6 +511,11 @@ export default function ReportForm() {
   const cardSale = Number(formData.cardSale) || 0;
   const electronicSales = toStrictDecimal3(onlineSale + cardSale);
   const totalSalesRevenue = toStrictDecimal3(cashSale + onlineSale + cardSale);
+  const formCogs = Number(formData.cogs) || 0;
+  const formGrossProfit = toStrictDecimal3(totalSalesRevenue - formCogs);
+  const formTotalOperatingExpense = toStrictDecimal3((Number(formData.cashExpense) || 0) + (Number(formData.bankExpense) || 0));
+  const formNetProfit = toStrictDecimal3(formGrossProfit - formTotalOperatingExpense);
+  const formGrossMarginPercent = totalSalesRevenue > 0 ? ((formGrossProfit / totalSalesRevenue) * 100).toFixed(1) : '0.0';
 
   // Closing Cash: Opening cash + cash sale + bank to cash - cash expenses - cash to bank - supplier cash bills
   const closingCash = toStrictDecimal3(
@@ -523,9 +554,12 @@ export default function ReportForm() {
       // Total Operating Expenses ONLY contains daily operating expenses (rent, salary, utilities).
       // Pending bill payments are Accounts Payable asset-liability exchanges, NOT operating expenses!
       const totalExpense = cashExpense + bankExpense;
-      const cogs = 0;
+      const cogs = Number(formData.cogs) || 0;
       const grossProfit = totalSale - cogs;
       const netProfit = grossProfit - totalExpense;
+
+      const effectiveOnlineBankId = onlineBankId || selectedBankId || branchBankAccounts[0]?.id || bankAccounts[0]?.id || '';
+      const effectiveCardBankId = cardBankId || selectedBankId || branchBankAccounts[0]?.id || bankAccounts[0]?.id || '';
 
       const report: DailyReport = {
         businessId: selectedBusiness.id,
@@ -541,7 +575,7 @@ export default function ReportForm() {
         cardSale: toStrictDecimal3(cardSale),
         bankSale: toStrictDecimal3(electronicSales),
         totalSale: toStrictDecimal3(totalSale),
-        cogs: 0,
+        cogs: toStrictDecimal3(cogs),
         grossProfit: toStrictDecimal3(grossProfit),
         cashExpense: toStrictDecimal3(cashExpense),
         bankExpense: toStrictDecimal3(bankExpense),
@@ -556,8 +590,8 @@ export default function ReportForm() {
         bankToBankRows: bankToBankRows.filter(r => r.amount > 0),
         closingCash: toStrictDecimal3(closingCash),
         closingBank: toStrictDecimal3(closingBank),
-        selectedBankId: selectedBankId || undefined,
-        cardBankId: (cardBankId || selectedBankId) || undefined,
+        selectedBankId: effectiveOnlineBankId || undefined,
+        cardBankId: effectiveCardBankId || undefined,
         expenseItems: expenseItems.length > 0 ? expenseItems : undefined,
         note: formData.note || '',
         createdAt: serverTimestamp(),
@@ -625,14 +659,13 @@ export default function ReportForm() {
         transactions.push({ ...common, type: 'income', amount: cashSale, toAccount: 'cash', category: 'Daily Cash Sale', description: `Report: ${format(new Date(), 'MMM dd')}` });
       }
       if (onlineSale > 0) {
-        transactions.push({ ...common, type: 'income', amount: onlineSale, toAccount: 'bank', toBankId: selectedBankId, category: 'Daily Online / Gateway Sale', description: `Online Sale: ${format(new Date(), 'MMM dd')}` });
+        transactions.push({ ...common, type: 'income', amount: onlineSale, toAccount: 'bank', toBankId: effectiveOnlineBankId, category: 'Daily Online / Gateway Sale', description: `Online Sale: ${format(new Date(), 'MMM dd')}` });
       }
       if (cardSale > 0) {
-        const effectiveCardBankId = cardBankId || selectedBankId;
         transactions.push({ ...common, type: 'income', amount: cardSale, toAccount: 'bank', toBankId: effectiveCardBankId, category: 'Daily Card / POS Machine Sale', description: `Card Machine Sale: ${format(new Date(), 'MMM dd')}` });
       }
       if (onlineSale === 0 && cardSale === 0 && Number(formData.bankSale) > 0) {
-        transactions.push({ ...common, type: 'income', amount: Number(formData.bankSale), toAccount: 'bank', toBankId: selectedBankId, category: 'Daily Bank Sale', description: `Report Bank Sales: ${format(new Date(), 'MMM dd')}` });
+        transactions.push({ ...common, type: 'income', amount: Number(formData.bankSale), toAccount: 'bank', toBankId: effectiveOnlineBankId, category: 'Daily Bank Sale', description: `Report Bank Sales: ${format(new Date(), 'MMM dd')}` });
       }
       if (formData.cashExpense > 0) {
         transactions.push({ ...common, type: 'expense', amount: formData.cashExpense, fromAccount: 'cash', category: 'Daily Cash Expense', description: `Report: ${format(new Date(), 'MMM dd')}` });
@@ -728,22 +761,38 @@ export default function ReportForm() {
       await Promise.all(transactions.map(t => addDoc(collection(db, 'transactions'), t)));
 
       // 4. Update Bank Balances precisely without conflicts
-      // Online / Gateway Sale routes directly to configured Online/Default bank account
-      if (onlineSale > 0 && selectedBankId) {
-        await updateDoc(doc(db, 'bankAccounts', selectedBankId), { balance: increment(onlineSale) });
+      // Online / Gateway Sale routes directly to configured Online bank account
+      if (onlineSale > 0) {
+        if (effectiveOnlineBankId) {
+          try {
+            await updateDoc(doc(db, 'bankAccounts', effectiveOnlineBankId), { balance: increment(onlineSale) });
+            const targetAcc = bankAccounts.find(b => b.id === effectiveOnlineBankId);
+            toast.success(`Online sale ${currency} ${formatAmount(onlineSale, currency)} deposited into ${targetAcc?.bankName || 'bank account'}!`);
+          } catch (onlineBankErr) {
+            console.error('Failed to update online bank balance:', onlineBankErr);
+            toast.error('Failed to update online bank balance. Please check bank permissions.');
+          }
+        } else {
+          toast.warning('Online sale recorded, but no bank account was available to receive funds. Please add a bank account in Finance.');
+        }
       }
 
       // Card Machine Sale routes directly to configured Card Settlement bank account
-      if (cardSale > 0) {
-        const effectiveCardBankId = cardBankId || selectedBankId;
-        if (effectiveCardBankId) {
+      if (cardSale > 0 && effectiveCardBankId) {
+        try {
           await updateDoc(doc(db, 'bankAccounts', effectiveCardBankId), { balance: increment(cardSale) });
+        } catch (cardBankErr) {
+          console.error('Failed to update card bank balance:', cardBankErr);
         }
       }
 
       // Fallback for legacy direct bank sale entry
-      if (onlineSale === 0 && cardSale === 0 && Number(formData.bankSale) > 0 && selectedBankId) {
-        await updateDoc(doc(db, 'bankAccounts', selectedBankId), { balance: increment(Number(formData.bankSale)) });
+      if (onlineSale === 0 && cardSale === 0 && Number(formData.bankSale) > 0 && effectiveOnlineBankId) {
+        try {
+          await updateDoc(doc(db, 'bankAccounts', effectiveOnlineBankId), { balance: increment(Number(formData.bankSale)) });
+        } catch (bankSaleErr) {
+          console.error('Failed to update direct bank sale balance:', bankSaleErr);
+        }
       }
 
       // Bank Expenses
@@ -814,6 +863,7 @@ export default function ReportForm() {
         onlineSale: 0,
         cardSale: 0,
         bankSale: 0,
+        cogs: 0,
         cashExpense: 0,
         bankExpense: 0,
         note: '',
@@ -957,6 +1007,7 @@ export default function ReportForm() {
       onlineSale: report.onlineSale || 0,
       cardSale: report.cardSale || 0,
       bankSale: report.bankSale || 0,
+      cogs: report.cogs || 0,
       cashExpense: report.cashExpense || 0,
       bankExpense: report.bankExpense || 0,
       bankToCash: report.bankToCash || 0,
@@ -991,7 +1042,7 @@ export default function ReportForm() {
       const newCashExpense = Number(editFormData.cashExpense) || 0;
       const newBankExpense = Number(editFormData.bankExpense) || 0;
       const newTotalExpense = toStrictDecimal3(newCashExpense + newBankExpense);
-      const cogs = Number(editingReport.cogs) || 0;
+      const cogs = Number(editFormData.cogs !== undefined ? editFormData.cogs : editingReport.cogs) || 0;
       const newGrossProfit = toStrictDecimal3(newTotalSale - cogs);
       const newNetProfit = toStrictDecimal3(newGrossProfit - newTotalExpense);
 
@@ -1197,6 +1248,7 @@ export default function ReportForm() {
         cardSale: newCardSale,
         bankSale: newElectronicSales,
         totalSale: newTotalSale,
+        cogs: toStrictDecimal3(cogs),
         grossProfit: newGrossProfit,
         cashExpense: newCashExpense,
         bankExpense: newBankExpense,
@@ -1347,7 +1399,6 @@ export default function ReportForm() {
                       value={formData.cashSale}
                       onChange={(v) => setFormData({ ...formData, cashSale: v })}
                       icon={<Wallet size={16} className="text-emerald-400" />}
-                      step="0.001"
                     />
                     <div className="flex items-center justify-between text-[10px] text-slate-400 px-1 font-bold">
                       <span className="text-emerald-400">💵 Physical Cash</span>
@@ -1369,12 +1420,11 @@ export default function ReportForm() {
                         }));
                       }}
                       icon={<Globe size={16} className="text-blue-400" />}
-                      step="0.001"
                     />
                     <div className="flex items-center justify-between text-[10px] text-slate-400 px-1 font-bold">
                       <span className="text-blue-400">🌐 Gateway / Wire</span>
-                      <span className="truncate max-w-[120px]" title={branchBankAccounts.find(b => b.id === selectedBankId)?.bankName || 'Default Bank'}>
-                        {branchBankAccounts.find(b => b.id === selectedBankId)?.bankName || 'Default Bank'}
+                      <span className="truncate max-w-[140px] text-blue-300 font-mono" title={branchBankAccounts.find(b => b.id === (onlineBankId || selectedBankId))?.bankName || 'Default Bank'}>
+                        → {branchBankAccounts.find(b => b.id === (onlineBankId || selectedBankId))?.bankName || 'Default Bank'}
                       </span>
                     </div>
                   </div>
@@ -1393,45 +1443,163 @@ export default function ReportForm() {
                         }));
                       }}
                       icon={<CreditCard size={16} className="text-indigo-400" />}
-                      step="0.001"
                     />
                     <div className="flex items-center justify-between text-[10px] text-slate-400 px-1 font-bold">
                       <span className="text-indigo-400">💳 Card POS Terminal</span>
-                      <span className="truncate max-w-[120px]" title={branchBankAccounts.find(b => b.id === (cardBankId || selectedBankId))?.bankName || 'Card Bank'}>
-                        {branchBankAccounts.find(b => b.id === (cardBankId || selectedBankId))?.bankName || 'Card Bank'}
+                      <span className="truncate max-w-[140px] text-indigo-300 font-mono" title={branchBankAccounts.find(b => b.id === (cardBankId || selectedBankId))?.bankName || 'Card Bank'}>
+                        → {branchBankAccounts.find(b => b.id === (cardBankId || selectedBankId))?.bankName || 'Card Bank'}
                       </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Card Machine Settlement Account Selector & Default Preset Saver */}
-                {branchBankAccounts.length > 0 && (
-                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 p-3.5 bg-slate-950/70 rounded-2xl border border-slate-800 text-xs">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1.5">
-                        <CreditCard size={14} className="text-indigo-400" />
-                        Card Settlement Bank:
+                {/* 4. Cost of Goods Sold (COGS) & Live Profit Breakdown */}
+                <div className="p-4 bg-gradient-to-br from-slate-900/90 via-slate-900/70 to-slate-950/90 rounded-2xl border border-slate-800 space-y-3 shadow-md">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <div className="p-1.5 bg-amber-500/10 text-amber-400 rounded-lg">
+                        <TrendingUp size={16} />
+                      </div>
+                      <div>
+                        <span className="text-xs font-black uppercase tracking-wider text-white">
+                          Cost of Goods Sold (COGS) & Profit Analysis
+                        </span>
+                        <p className="text-[10px] text-slate-400 font-medium">
+                          Product inventory cost for today's sales (auto-calculated from SalesPlay POS receipts)
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                    {/* COGS Input */}
+                    <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-800 space-y-1">
+                      <InputGroup
+                        label="COGS (-)"
+                        value={formData.cogs}
+                        onChange={(v) => setFormData({ ...formData, cogs: v })}
+                        icon={<Receipt size={16} className="text-amber-400" />}
+                      />
+                      <span className="text-[9px] text-slate-400 block px-1 font-medium">
+                        Cost price of items sold today
                       </span>
-                      <select
-                        value={cardBankId || selectedBankId}
-                        onChange={(e) => setCardBankId(e.target.value)}
-                        className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-xs text-white font-bold outline-none focus:border-indigo-500"
-                      >
-                        {branchBankAccounts.map(b => (
-                          <option key={b.id} value={b.id}>{b.bankName} - {b.accountName}</option>
-                        ))}
-                      </select>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={handleSaveBankPresets}
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-xl text-[11px] font-bold transition-all active:scale-95 cursor-pointer"
-                      title="Save current Online & Card bank accounts as default preset"
-                    >
-                      <Save size={13} />
-                      <span>Save as Default Preset</span>
-                    </button>
+                    {/* Gross Profit Live Card */}
+                    <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-800 flex flex-col justify-between">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                        Gross Profit (Sales - COGS)
+                      </span>
+                      <div className="flex items-baseline justify-between mt-1">
+                        <span className={cn(
+                          "text-base font-black font-mono",
+                          formGrossProfit >= 0 ? "text-emerald-400" : "text-rose-400"
+                        )}>
+                          {currency} {formatAmount(formGrossProfit, currency)}
+                        </span>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-800 text-emerald-400 font-mono">
+                          {formGrossMarginPercent}%
+                        </span>
+                      </div>
+                      <span className="text-[9px] text-slate-500 font-mono mt-1">
+                        Sales: {currency} {formatAmount(totalSalesRevenue, currency)}
+                      </span>
+                    </div>
+
+                    {/* Net Profit Live Card */}
+                    <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-800 flex flex-col justify-between">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                        Est. Net Profit (GP - Exp)
+                      </span>
+                      <div className="flex items-baseline justify-between mt-1">
+                        <span className={cn(
+                          "text-base font-black font-mono",
+                          formNetProfit >= 0 ? "text-blue-400" : "text-rose-400"
+                        )}>
+                          {currency} {formatAmount(formNetProfit, currency)}
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          Exp: {formatAmount(formTotalOperatingExpense, currency)}
+                        </span>
+                      </div>
+                      <span className="text-[9px] text-slate-500 font-mono mt-1">
+                        Operating Exp: {currency} {formatAmount(formTotalOperatingExpense, currency)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bank Routing Panel for Online Gateway & Card POS Payments */}
+                {branchBankAccounts.length > 0 && (
+                  <div className="p-4 bg-slate-950/80 rounded-2xl border border-slate-800 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 bg-blue-500/10 text-blue-400 rounded-lg">
+                          <Landmark size={15} />
+                        </div>
+                        <div>
+                          <span className="text-xs font-black uppercase tracking-wider text-white">
+                            Electronic Sales Bank Routing
+                          </span>
+                          <p className="text-[10px] text-slate-400 font-medium">
+                            Choose which bank account receives Online Payments vs Card POS transactions
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleSaveBankPresets}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-xl text-[11px] font-bold transition-all active:scale-95 cursor-pointer self-start sm:self-auto"
+                        title="Save current Online & Card bank accounts as default preset"
+                      >
+                        <Save size={13} />
+                        <span>Save as Default Preset</span>
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                      {/* 1. Online / Gateway Bank Selector */}
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
+                          <Globe size={13} />
+                          Online Payment Bank (Deposit Destination):
+                        </label>
+                        <select
+                          value={onlineBankId || selectedBankId || branchBankAccounts[0]?.id || ''}
+                          onChange={(e) => {
+                            setOnlineBankId(e.target.value);
+                            setSelectedBankId(e.target.value);
+                          }}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white font-bold outline-none focus:border-blue-500 cursor-pointer"
+                        >
+                          {branchBankAccounts.map(b => (
+                            <option key={b.id} value={b.id}>
+                              {b.bankName} - {b.accountName} {b.accountNumber ? `(${b.accountNumber})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* 2. Card Settlement Bank Selector */}
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+                          <CreditCard size={13} />
+                          Card POS Machine Bank (Deposit Destination):
+                        </label>
+                        <select
+                          value={cardBankId || selectedBankId || branchBankAccounts[0]?.id || ''}
+                          onChange={(e) => setCardBankId(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white font-bold outline-none focus:border-indigo-500 cursor-pointer"
+                        >
+                          {branchBankAccounts.map(b => (
+                            <option key={b.id} value={b.id}>
+                              {b.bankName} - {b.accountName} {b.accountNumber ? `(${b.accountNumber})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
                   </div>
                 )}
 
@@ -1534,12 +1702,9 @@ export default function ReportForm() {
                         <label className="text-[9px] font-black text-slate-400 uppercase tracking-wider block mb-1">
                           Payment ({currency})
                         </label>
-                        <input
-                          type="number"
-                          step="0.001"
-                          min="0"
-                          value={pendingPaymentAmount === 0 ? '' : pendingPaymentAmount}
-                          onChange={(e) => setPendingPaymentAmount(parseFloat(e.target.value) || 0)}
+                        <DecimalRowInput
+                          value={pendingPaymentAmount}
+                          onChange={setPendingPaymentAmount}
                           placeholder="0.000"
                           className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs font-mono font-black text-rose-400 outline-none focus:border-indigo-500 text-right"
                         />
@@ -1708,13 +1873,10 @@ export default function ReportForm() {
                             <span className="text-[10px] font-mono text-slate-500 w-5 text-center">#{idx + 1}</span>
                             <div className="flex-1">
                               <label className="text-[9px] font-bold text-slate-400 block mb-0.5 sm:hidden">Withdraw Amount ({currency})</label>
-                              <input
-                                type="number"
-                                step="0.001"
-                                min="0"
+                              <DecimalRowInput
+                                value={row.amount}
+                                onChange={(val) => handleUpdateBankToCashRow(row.id, 'amount', val)}
                                 placeholder="0.000"
-                                value={row.amount === 0 ? '' : row.amount}
-                                onChange={(e) => handleUpdateBankToCashRow(row.id, 'amount', parseFloat(e.target.value) || 0)}
                                 className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs font-mono font-bold text-amber-300 outline-none focus:border-amber-500 text-right"
                               />
                             </div>
@@ -1779,13 +1941,10 @@ export default function ReportForm() {
                             <span className="text-[10px] font-mono text-slate-500 w-5 text-center">#{idx + 1}</span>
                             <div className="flex-1">
                               <label className="text-[9px] font-bold text-slate-400 block mb-0.5 sm:hidden">Deposit Amount ({currency})</label>
-                              <input
-                                type="number"
-                                step="0.001"
-                                min="0"
+                              <DecimalRowInput
+                                value={row.amount}
+                                onChange={(val) => handleUpdateCashToBankRow(row.id, 'amount', val)}
                                 placeholder="0.000"
-                                value={row.amount === 0 ? '' : row.amount}
-                                onChange={(e) => handleUpdateCashToBankRow(row.id, 'amount', parseFloat(e.target.value) || 0)}
                                 className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs font-mono font-bold text-emerald-300 outline-none focus:border-emerald-500 text-right"
                               />
                             </div>
@@ -1853,13 +2012,10 @@ export default function ReportForm() {
                           <div key={row.id} className="grid grid-cols-1 sm:grid-cols-12 gap-2 bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 items-center">
                             <div className="sm:col-span-4">
                               <label className="text-[9px] font-bold text-slate-400 block mb-0.5 sm:hidden">Transfer Amount ({currency})</label>
-                              <input
-                                type="number"
-                                step="0.001"
-                                min="0"
+                              <DecimalRowInput
+                                value={row.amount}
+                                onChange={(val) => handleUpdateBankToBankRow(row.id, 'amount', val)}
                                 placeholder="0.000"
-                                value={row.amount === 0 ? '' : row.amount}
-                                onChange={(e) => handleUpdateBankToBankRow(row.id, 'amount', parseFloat(e.target.value) || 0)}
                                 className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs font-mono font-bold text-blue-400 outline-none focus:border-blue-500 text-right"
                               />
                             </div>
@@ -2071,6 +2227,35 @@ export default function ReportForm() {
                         : (services.find(s => s.id === report.serviceId)?.name || 'Service')
                       }
                     </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80">
+                  <div>
+                    <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Total Sales</p>
+                    <p className="text-xs font-black font-mono text-emerald-400">{currency} {formatAmount(report.totalSale || 0, currency)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest">COGS (Cost)</p>
+                    <p className="text-xs font-black font-mono text-amber-400">{currency} {formatAmount(report.cogs || 0, currency)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Gross Profit</p>
+                    <p className={cn(
+                      "text-xs font-black font-mono",
+                      ((report.grossProfit !== undefined ? report.grossProfit : ((report.totalSale || 0) - (report.cogs || 0))) >= 0) ? "text-emerald-400" : "text-rose-400"
+                    )}>
+                      {currency} {formatAmount(report.grossProfit !== undefined ? report.grossProfit : ((report.totalSale || 0) - (report.cogs || 0)), currency)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Net Profit</p>
+                    <p className={cn(
+                      "text-xs font-black font-mono",
+                      (report.netProfit || 0) >= 0 ? "text-blue-400" : "text-rose-400"
+                    )}>
+                      {currency} {formatAmount(report.netProfit || 0, currency)}
+                    </p>
                   </div>
                 </div>
 
@@ -2472,6 +2657,22 @@ export default function ReportForm() {
                   />
                 </div>
 
+                {/* COGS in Edit Modal */}
+                <div className="bg-slate-900/50 p-3 rounded-2xl border border-slate-800 space-y-1">
+                  <InputGroup
+                    label="Cost of Goods Sold (COGS) (-)"
+                    value={editFormData.cogs}
+                    onChange={(v) => setEditFormData({ ...editFormData, cogs: v })}
+                    icon={<Receipt size={16} className="text-amber-400" />}
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-400 px-1 font-bold">
+                    <span>Recalculated Gross Profit:</span>
+                    <span className="font-mono text-emerald-400">
+                      {currency} {formatAmount(toStrictDecimal3((Number(editFormData.cashSale) || 0) + (Number(editFormData.onlineSale) || 0) + (Number(editFormData.cardSale) || 0) - (Number(editFormData.cogs) || 0)), currency)}
+                    </span>
+                  </div>
+                </div>
+
                 {/* Bank Routing for Online & Card Sales in Edit Modal */}
                 {branchBankAccounts.length > 0 && (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-900/50 p-3 rounded-2xl border border-slate-800">
@@ -2683,7 +2884,40 @@ export default function ReportForm() {
   );
 }
 
-function InputGroup({ label, value, onChange, readOnly, icon, step = "0.001" }: { label: string; value: number; onChange?: (v: number) => void; readOnly?: boolean; icon?: React.ReactNode; step?: string }) {
+function InputGroup({
+  label,
+  value,
+  onChange,
+  readOnly,
+  icon,
+  placeholder = "0.000",
+}: {
+  label: string;
+  value: number;
+  onChange?: (v: number) => void;
+  readOnly?: boolean;
+  icon?: React.ReactNode;
+  step?: string;
+  placeholder?: string;
+}) {
+  const [textValue, setTextValue] = useState<string>(value === 0 ? '' : String(value));
+
+  useEffect(() => {
+    const currentNum = parseFloat(textValue) || 0;
+    if (value !== currentNum && !(value === 0 && (textValue === '' || textValue === '0' || textValue === '0.' || textValue === '0.0' || textValue === '0.00'))) {
+      setTextValue(value === 0 ? '' : String(value));
+    }
+  }, [value]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    let raw = e.target.value.replace(',', '.');
+    if (raw === '' || /^[0-9]*\.?[0-9]*$/.test(raw)) {
+      setTextValue(raw);
+      const parsed = parseFloat(raw);
+      onChange?.(isNaN(parsed) ? 0 : parsed);
+    }
+  };
+
   return (
     <div className="space-y-2">
       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1 flex items-center gap-1.5">
@@ -2691,18 +2925,56 @@ function InputGroup({ label, value, onChange, readOnly, icon, step = "0.001" }: 
         {label}
       </label>
       <input
-        type="number"
-        step={step}
-        value={value === 0 ? '' : value}
-        onChange={(e) => onChange?.(parseFloat(e.target.value) || 0)}
+        type="text"
+        inputMode="decimal"
+        value={readOnly ? (value === 0 ? '0.000' : formatAmount(value, 'OMR')) : textValue}
+        onChange={handleChange}
         readOnly={readOnly}
-        min="0"
-        max="1000000000"
+        placeholder={placeholder}
         className={cn(
           "w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 text-sm focus:border-blue-500 outline-none transition-all font-mono",
           readOnly && "opacity-60 cursor-not-allowed"
         )}
       />
     </div>
+  );
+}
+
+function DecimalRowInput({
+  value,
+  onChange,
+  className,
+  placeholder = "0.000",
+}: {
+  value: number;
+  onChange: (val: number) => void;
+  className?: string;
+  placeholder?: string;
+}) {
+  const [text, setText] = useState<string>(value === 0 ? '' : String(value));
+
+  useEffect(() => {
+    const cur = parseFloat(text) || 0;
+    if (value !== cur && !(value === 0 && (text === '' || text === '0' || text === '0.' || text === '0.0' || text === '0.00'))) {
+      setText(value === 0 ? '' : String(value));
+    }
+  }, [value]);
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={text}
+      onChange={(e) => {
+        let raw = e.target.value.replace(',', '.');
+        if (raw === '' || /^[0-9]*\.?[0-9]*$/.test(raw)) {
+          setText(raw);
+          const parsed = parseFloat(raw);
+          onChange(isNaN(parsed) ? 0 : parsed);
+        }
+      }}
+      placeholder={placeholder}
+      className={className}
+    />
   );
 }

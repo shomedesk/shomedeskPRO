@@ -272,6 +272,31 @@
         "shopId": { "type": "string" }
       },
       "required": ["businessId"]
+    },
+    "saleInvoice": {
+      "title": "Sale Invoice",
+      "description": "Sale invoice imported from SalesPlay POS or recorded in POS",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "branchId": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "totalCost": { "type": "number" },
+        "grossProfit": { "type": "number" },
+        "paymentMode": { "type": "string" }
+      },
+      "required": ["businessId", "invoiceNumber", "totalAmount"]
+    },
+    "salesPlayCatalog": {
+      "title": "SalesPlay Catalog",
+      "description": "Cached product catalog and categories from SalesPlay POS",
+      "type": "object",
+      "properties": {
+        "updatedAt": { "type": "string" },
+        "count": { "type": "number" }
+      }
     }
   },
   "firestore": {
@@ -298,6 +323,18 @@
     "/dailyReports/{reportId}": {
       "schema": "dailyReport",
       "description": "Daily reports submitted by managers"
+    },
+    "/sales/{saleId}": {
+      "schema": "saleInvoice",
+      "description": "Sales invoices and POS receipts"
+    },
+    "/pos_transactions/{txnId}": {
+      "schema": "saleInvoice",
+      "description": "POS transactions mirrored from SalesPlay"
+    },
+    "/salesPlayCatalog/{docId}": {
+      "schema": "salesPlayCatalog",
+      "description": "Cached catalog of SalesPlay products and categories"
     },
     "/suppliers/{supplierId}": {
       "schema": "supplier",

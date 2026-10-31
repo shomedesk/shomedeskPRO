@@ -90,10 +90,15 @@ export default function FinanceManager({ accountType }: FinanceManagerProps) {
   }, [selectedBusiness, selectedBranch, accountType, isAllBusinessesSelected]);
 
   const filteredBankAccounts = isAllBusinessesSelected 
-    ? bankAccounts.filter(ba => ba.businessId === 'global')
+    ? bankAccounts.filter(ba => ba.businessId === 'global' || businesses.some(b => b.id === ba.businessId))
     : bankAccounts.filter(ba => 
-        ba.businessId === selectedBusiness?.id && 
-        (selectedBranch ? ba.branchId === selectedBranch.id : (selectedService ? ba.serviceId === selectedService.id : ba.branchId === 'global'))
+        (ba.businessId === selectedBusiness?.id || ba.businessId === 'global') && 
+        (selectedBranch 
+          ? (ba.branchId === selectedBranch.id || ba.branchId === 'global' || !ba.branchId) 
+          : (selectedService 
+              ? (ba.serviceId === selectedService.id || !ba.serviceId) 
+              : true)
+        )
       );
 
   const balance = accountType === 'bank' 
@@ -356,14 +361,18 @@ function AddBankModal({ onClose }: { onClose: () => void }) {
           <div className="space-y-2">
             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Initial Balance</label>
             <input
-              type="number"
+              type="text"
+              inputMode="decimal"
               required
-              min={0}
-              max={1000000000}
               value={balance}
-              onChange={(e) => setBalance(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 text-sm outline-none focus:border-blue-500"
-              placeholder="0.00"
+              onChange={(e) => {
+                let raw = e.target.value.replace(',', '.');
+                if (raw === '' || /^[0-9]*\.?[0-9]*$/.test(raw)) {
+                  setBalance(raw);
+                }
+              }}
+              className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 text-sm outline-none focus:border-blue-500 font-mono"
+              placeholder="0.000"
             />
           </div>
           <button
@@ -910,14 +919,18 @@ function TransactionModal({ type, accountType, onClose }: { type: TransactionTyp
           <div className="space-y-2">
             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Amount</label>
             <input
-              type="number"
+              type="text"
+              inputMode="decimal"
               required
-              min="0"
-              max="1000000000"
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 text-lg font-black text-blue-400 outline-none focus:border-blue-500"
-              placeholder="0.00"
+              onChange={(e) => {
+                let raw = e.target.value.replace(',', '.');
+                if (raw === '' || /^[0-9]*\.?[0-9]*$/.test(raw)) {
+                  setAmount(raw);
+                }
+              }}
+              className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 text-lg font-black text-blue-400 outline-none focus:border-blue-500 font-mono"
+              placeholder="0.000"
             />
           </div>
           <div className="space-y-2">

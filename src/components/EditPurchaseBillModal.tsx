@@ -695,7 +695,7 @@ export function EditPurchaseBillModal({
                               <input
                                 type="number"
                                 min="0.001"
-                                step={isWeight ? '0.001' : '1'}
+                                step="0.001"
                                 value={item.quantity || 1}
                                 onChange={(e) => handleItemFieldChange(idx, 'quantity', e.target.value)}
                                 className="w-full bg-slate-950 text-slate-100 text-xs font-bold px-2 py-1.5 rounded-lg border border-slate-700 outline-none focus:border-blue-400"

@@ -256,14 +256,9 @@ export function ExpensesBreakdownModal({
                       Amount ({currency})
                     </label>
                     <div className="relative">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.001"
-                        value={item.amount === 0 ? '' : item.amount}
-                        onChange={(e) => handleUpdateItem(item.id, 'amount', e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
-                        placeholder="0.000"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-right font-mono font-black text-rose-400 outline-none focus:border-rose-500"
+                      <ExpenseAmountInput
+                        value={item.amount}
+                        onChange={(val) => handleUpdateItem(item.id, 'amount', val)}
                       />
                     </div>
                   </div>
@@ -374,5 +369,40 @@ export function ExpensesBreakdownModal({
         </div>
       </div>
     </div>
+  );
+}
+
+function ExpenseAmountInput({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  const [textVal, setTextVal] = useState<string>(value === 0 ? '' : String(value));
+
+  useEffect(() => {
+    const cur = parseFloat(textVal) || 0;
+    if (value !== cur && !(value === 0 && (textVal === '' || textVal === '0' || textVal === '0.' || textVal === '0.0' || textVal === '0.00'))) {
+      setTextVal(value === 0 ? '' : String(value));
+    }
+  }, [value]);
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={textVal}
+      onChange={(e) => {
+        let raw = e.target.value.replace(',', '.');
+        if (raw === '' || /^[0-9]*\.?[0-9]*$/.test(raw)) {
+          setTextVal(raw);
+          const parsed = parseFloat(raw);
+          onChange(isNaN(parsed) ? 0 : parsed);
+        }
+      }}
+      placeholder="0.000"
+      className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-right font-mono font-black text-rose-400 outline-none focus:border-rose-500"
+    />
   );
 }

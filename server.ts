@@ -105,7 +105,7 @@ app.all('/api/salesplay*', async (req, res) => {
 
   const rawAuth = (req.headers.authorization as string) || `Bearer ${DEFAULT_SALESPLAY_API_TOKEN}`;
   const headers: Record<string, string> = {
-    Accept: 'application/json, text/plain, */*',
+    Accept: '*/*',
     Authorization: rawAuth.startsWith('Bearer ') ? rawAuth : `Bearer ${rawAuth}`,
   };
 
@@ -237,7 +237,81 @@ app.all('/api/salesplay*', async (req, res) => {
       });
     }
 
-    // Standard proxy for all other requests (POST receipts, POST inventory, shops, etc.)
+    // Special auto-paginated handling for POST /receipts:
+    // SalesPlay returns receipts in chunks of 10. Automatically loop with cursor
+    // to retrieve ALL sales receipts for the date range so no transactions or COGS are lost.
+    if (req.method === 'POST' && cleanPath === '/receipts') {
+      const allReceipts: any[] = [];
+      const seenReceiptNumbers = new Set<string>();
+      let cursor = (req.body?.cursor as string) || '';
+      let lastCursor = '';
+
+      // If client explicitly asks for a single page
+      if (req.query.page_only === 'true') {
+        const result = await executeSalesPlayRequest('/receipts', 'POST', headers, req.body);
+        res.status(result.statusCode);
+        const ct = result.headers['content-type'];
+        if (ct) res.setHeader('Content-Type', ct);
+        return res.send(result.data);
+      }
+
+      let pageCount = 0;
+      while (pageCount < 50) {
+        pageCount++;
+        const body: Record<string, any> = {
+          ...(req.body || {}),
+        };
+        if (cursor) {
+          body.cursor = cursor;
+        } else {
+          delete body.cursor;
+        }
+
+        const result = await executeSalesPlayRequest('/receipts', 'POST', headers, body);
+        if (result.statusCode !== 200) {
+          if (allReceipts.length > 0) break;
+          res.status(result.statusCode);
+          res.setHeader('Content-Type', 'application/json');
+          return res.send(result.data);
+        }
+
+        let parsed: any;
+        try {
+          parsed = JSON.parse(result.data);
+        } catch {
+          break;
+        }
+
+        const receipts = parsed.receipts || [];
+        if (!Array.isArray(receipts) || receipts.length === 0) {
+          break;
+        }
+
+        for (const r of receipts) {
+          const key = r.receipt_number || JSON.stringify(r);
+          if (!seenReceiptNumbers.has(key)) {
+            seenReceiptNumbers.add(key);
+            allReceipts.push(r);
+          }
+        }
+
+        lastCursor = parsed.cursor || '';
+        if (!parsed.cursor || parsed.cursor === cursor) {
+          break;
+        }
+        cursor = parsed.cursor;
+      }
+
+      res.status(200);
+      res.setHeader('Content-Type', 'application/json');
+      return res.json({
+        receipts: allReceipts,
+        total: allReceipts.length,
+        cursor: lastCursor,
+      });
+    }
+
+    // Standard proxy for all other requests (POST inventory, shops, etc.)
     const payload = (req.body && Object.keys(req.body).length > 0)
       ? req.body
       : undefined;

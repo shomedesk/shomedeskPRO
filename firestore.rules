@@ -159,10 +159,9 @@ service cloud.firestore {
     }
 
     function isValidBankAccount(data) {
-      return isValidString(data.accountName, 1, 100) &&
-             isValidString(data.accountNumber, 1, 50) &&
-             isValidString(data.bankName, 1, 100) &&
-             isValidAmount(data.balance);
+      return isValidString(data.get('accountName', 'Account'), 1, 100) &&
+             isValidString(data.get('bankName', 'Bank'), 1, 100) &&
+             data.balance is number;
     }
 
     function isValidDailyReport(data) {
@@ -335,16 +334,28 @@ service cloud.firestore {
     }
 
     match /bankAccounts/{accountId} {
-      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin() || belongsToBusiness(resource.data.businessId));
-      allow create: if isAuthenticated() && (request.resource.data.ownerId == request.auth.uid || isAdmin()) && isValidBankAccount(request.resource.data);
+      allow read: if isAuthenticated() && (
+        isAdmin() || 
+        resource.data.get('ownerId', '') == request.auth.uid || 
+        belongsToBusiness(resource.data.get('businessId', 'global'))
+      );
+      allow create: if isAuthenticated() && (
+        isAdmin() || 
+        canWriteBusiness(request.resource.data.get('businessId', 'global')) || 
+        request.resource.data.get('ownerId', '') == request.auth.uid
+      ) && isValidBankAccount(request.resource.data);
       allow update: if isAuthenticated() && (
-        isAdmin() || (
-          request.resource.data.ownerId == resource.data.ownerId &&
-          request.resource.data.businessId == resource.data.businessId &&
+        isAdmin() || 
+        canWriteBusiness(resource.data.get('businessId', 'global')) || 
+        resource.data.get('ownerId', '') == request.auth.uid ||
+        resource.data.get('businessId', 'global') == 'global' ||
+        (
+          request.resource.data.get('ownerId', '') == resource.data.get('ownerId', '') &&
+          request.resource.data.get('businessId', 'global') == resource.data.get('businessId', 'global') &&
           isValidBankAccount(request.resource.data)
         )
       );
-      allow delete: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow delete: if isAuthenticated() && (resource.data.get('ownerId', '') == request.auth.uid || isAdmin());
     }
 
     match /transactions/{transactionId} {

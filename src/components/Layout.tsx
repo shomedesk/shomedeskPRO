@@ -28,7 +28,8 @@ import {
   Coins,
   Calculator,
   Globe,
-  ShoppingBag
+  ShoppingBag,
+  RefreshCw
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { auth } from '@/src/lib/firebase';
@@ -55,9 +56,25 @@ export default function Layout() {
     setSelectedBranch, 
     setSelectedService,
     setAllBusinessesSelected,
+    syncSalesPlayData,
+    isSyncingSalesPlay,
     userProfile 
   } = useBusiness();
   const navigate = useNavigate();
+
+  const handleQuickSync = async () => {
+    const toastId = toast.loading('Syncing latest items & sales from SalesPlay POS...');
+    try {
+      const res = await syncSalesPlayData(true);
+      if (res.success) {
+        toast.success(res.message, { id: toastId });
+      } else {
+        toast.error(res.message, { id: toastId });
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Sync encountered a network issue', { id: toastId });
+    }
+  };
 
   // Document Renewal Alerts
   useEffect(() => {
@@ -346,6 +363,16 @@ export default function Layout() {
             </div>
 
             <div className="flex items-center gap-2 md:gap-3">
+              <button
+                type="button"
+                onClick={handleQuickSync}
+                disabled={isSyncingSalesPlay}
+                className="px-2.5 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-50 cursor-pointer shadow-sm"
+                title="Sync latest items and sales receipts from SalesPlay POS"
+              >
+                <RefreshCw size={13} className={cn(isSyncingSalesPlay && "animate-spin")} />
+                <span className="hidden sm:inline">{isSyncingSalesPlay ? 'Syncing...' : 'Sync POS'}</span>
+              </button>
               <PWAInstallButton />
               <NotificationCenter />
               <div className="h-6 md:h-8 w-px bg-slate-800" />

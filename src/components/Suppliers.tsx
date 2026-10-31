@@ -1412,11 +1412,11 @@ function PurchaseEntryForm({
                               </button>
                               <input
                                 type="number"
-                                step={isKg ? "0.001" : "1"}
+                                step="0.001"
                                 min="0.001"
                                 value={item.quantity}
                                 onChange={(e) => handleUpdateBillItem(idx, 'quantity', parseFloat(e.target.value) || 0)}
-                                placeholder={isKg ? "0.000" : "1"}
+                                placeholder="0.000"
                                 className="w-14 bg-slate-950 border border-slate-800 rounded-lg p-1.5 text-xs text-center text-slate-100 font-bold outline-none"
                               />
                               <button

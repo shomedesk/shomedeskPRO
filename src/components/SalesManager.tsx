@@ -175,16 +175,11 @@ export default function SalesManager() {
 
     let q;
     if (isAllBusinessesSelected) {
-      q = query(
-        collection(db, 'sales'),
-        orderBy('date', 'desc')
-      );
+      q = query(collection(db, 'sales'));
     } else {
       q = query(
         collection(db, 'sales'),
-        where('businessId', '==', selectedBusiness!.id),
-        ...(selectedBranch ? [where('branchId', '==', selectedBranch.id)] : []),
-        orderBy('date', 'desc')
+        where('businessId', '==', selectedBusiness!.id)
       );
     }
 
@@ -193,6 +188,14 @@ export default function SalesManager() {
         id: doc.id,
         ...doc.data()
       } as SaleInvoice));
+
+      // Sort newest to oldest in-memory to avoid Firestore multi-field index requirements
+      list.sort((a, b) => {
+        const timeA = a.date ? new Date(a.date).getTime() : 0;
+        const timeB = b.date ? new Date(b.date).getTime() : 0;
+        return timeB - timeA;
+      });
+
       setInvoices(list);
       setLoading(false);
     }, (error) => {
@@ -226,6 +229,11 @@ export default function SalesManager() {
     }
 
     return invoices.filter(inv => {
+      // Branch check: if branch selected, match branch or allow global/main receipts
+      if (selectedBranch && inv.branchId && inv.branchId !== 'global' && inv.branchId !== 'main' && inv.branchId !== selectedBranch.id) {
+        return false;
+      }
+
       // 1. Date check
       const invDate = inv.date ? parseISO(inv.date) : new Date();
       const inRange = isWithinInterval(invDate, { start, end });

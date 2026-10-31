@@ -978,10 +978,10 @@ export function PurchaseOrderManager({
                                 <input
                                   type="number"
                                   min="0.001"
-                                  step={isKg ? '0.001' : '1'}
+                                  step="0.001"
                                   value={item.quantity}
                                   onChange={(e) => handleUpdateItem(idx, 'quantity', parseFloat(e.target.value) || 0)}
-                                  placeholder={isKg ? '0.000' : '1'}
+                                  placeholder="0.000"
                                   className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2 text-xs text-slate-100 text-right outline-none focus:border-indigo-500 font-bold font-mono min-w-[80px]"
                                   required
                                 />

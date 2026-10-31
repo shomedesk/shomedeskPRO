@@ -31,16 +31,29 @@ async function safeFetchSalesPlayJson<T>(
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
 
   // Candidate URLs in priority order:
-  // 1. Local/Applet reverse proxy (/api/salesplay) - handles CORS, pagination, and auth
-  // 2. Direct SalesPlay API endpoint (for browsers/clients with direct network reach)
+  // 1. Same-origin reverse proxy (/api/salesplay) - handles CORS, pagination, and auth
+  // 2. Cloud Run Applet backend endpoints (for standalone webapp on external origins)
+  // 3. Direct SalesPlay API endpoint
   const candidateUrls: string[] = [
     `/api/salesplay${cleanPath}`,
+    `https://ais-pre-qqunexm2wvpnenivdg53h4-416302796444.asia-east1.run.app/api/salesplay${cleanPath}`,
+    `https://ais-dev-qqunexm2wvpnenivdg53h4-416302796444.asia-east1.run.app/api/salesplay${cleanPath}`,
     `${SALESPLAY_API_BASE}${cleanPath}`,
   ];
 
+  const mergedHeaders: Record<string, string> = {
+    'Accept': '*/*',
+    ...((options.headers as Record<string, string>) || {}),
+  };
+
+  const reqOptions: RequestInit = {
+    ...options,
+    headers: mergedHeaders,
+  };
+
   for (const url of candidateUrls) {
     try {
-      const res = await fetch(url, options);
+      const res = await fetch(url, reqOptions);
       if (!res.ok) {
         continue;
       }
@@ -302,7 +315,28 @@ export async function fetchSalesPlayProductsWithInventory(
     console.warn('Network issue fetching live SalesPlay products, using cached catalog:', error);
   }
 
-  // 3. Fallback: Check localStorage cache (if not force-refreshing)
+  // 3. Fallback: Check Firestore cloud catalog FIRST (persistent across all launched sites & devices)
+  try {
+    const snap = await getDoc(doc(db, 'salesPlayCatalog', 'all_products'));
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data && Array.isArray(data.products) && data.products.length > 0) {
+        // Refresh local cache with latest cloud items
+        try {
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('salesplay_cached_products', JSON.stringify(data.products));
+          }
+        } catch {
+          // ignore storage error
+        }
+        return data.products as SalesPlayProduct[];
+      }
+    }
+  } catch (fsErr) {
+    console.warn('Notice reading cached catalog from Firestore:', fsErr);
+  }
+
+  // 4. Fallback: Check localStorage cache (if offline or Firestore unavailable)
   if (!forceRefresh) {
     try {
       if (typeof window !== 'undefined') {
@@ -314,22 +348,9 @@ export async function fetchSalesPlayProductsWithInventory(
           }
         }
       }
-    } catch (e) {
+    } catch {
       // ignore parse error
     }
-  }
-
-  // 4. Fallback: Check Firestore cached catalog (great for launched site without proxy)
-  try {
-    const snap = await getDoc(doc(db, 'salesPlayCatalog', 'all_products'));
-    if (snap.exists()) {
-      const data = snap.data();
-      if (data && Array.isArray(data.products) && data.products.length > 0) {
-        return data.products as SalesPlayProduct[];
-      }
-    }
-  } catch {
-    // ignore
   }
 
   // 5. Ultimate Fallback: Complete 97-product catalog matching actual SalesPlay account items
@@ -656,7 +677,8 @@ export function convertReceiptToSaleInvoice(
   businessId: string,
   ownerId: string,
   branchId: string,
-  settings?: SalesPlaySettings | null
+  settings?: SalesPlaySettings | null,
+  productCostMap?: Map<string, number>
 ): SaleInvoice {
   const customerObj = receipt.customer?.[0];
   const customerName = customerObj?.name && customerObj.name !== 'N/A' ? customerObj.name : 'Walk-in Customer';
@@ -709,12 +731,28 @@ export function convertReceiptToSaleInvoice(
     const qty = Number(lp.quantity) || 1;
     const unitPrice = Number(lp.price) || 0;
     const totalPrice = Number(lp.total_money) || (qty * unitPrice);
-    const unitCost = Number(lp.cost) || 0;
-    const costTotal = Number(lp.cost_total) !== undefined && lp.cost_total !== null
-      ? Number(lp.cost_total)
-      : (unitCost * qty);
+    
+    // Check line product cost from SalesPlay receipt
+    let unitCost = Number(lp.cost) || 0;
+    // If receipt line didn't contain cost, look up from our full product catalog map
+    if (unitCost === 0 && productCostMap) {
+      if (lp.product_id && productCostMap.has(lp.product_id)) {
+        unitCost = productCostMap.get(lp.product_id)!;
+      } else if (lp.product_code && productCostMap.has(lp.product_code)) {
+        unitCost = productCostMap.get(lp.product_code)!;
+      } else if (lp.product_name && productCostMap.has(lp.product_name.toLowerCase().trim())) {
+        unitCost = productCostMap.get(lp.product_name.toLowerCase().trim())!;
+      }
+    }
 
-    totalCost += costTotal;
+    let costTotal = Number(lp.cost_total) || 0;
+    if (costTotal <= 0 && unitCost > 0) {
+      costTotal = toStrictDecimal3(unitCost * qty);
+    } else if (costTotal > 0 && unitCost <= 0 && qty > 0) {
+      unitCost = toStrictDecimal3(costTotal / qty);
+    }
+
+    totalCost = toStrictDecimal3(totalCost + costTotal);
 
     return {
       id: lp.product_id || `item_${idx}`,
@@ -831,17 +869,39 @@ export async function syncSalesPlaySalesToFirestore({
   let onlineTotal = 0;
   let importedCount = 0;
 
-  const filteredReceipts = targetShopId 
+  // Build product cost map for accurate COGS calculation
+  const productCostMap = new Map<string, number>();
+  try {
+    const products = await fetchSalesPlayProductsWithInventory(token, targetShopId, false);
+    for (const p of products) {
+      if (p.cost > 0) {
+        if (p.id) productCostMap.set(p.id, p.cost);
+        if (p.product_code) productCostMap.set(p.product_code, p.cost);
+        if (p.barcode) productCostMap.set(p.barcode, p.cost);
+        if (p.product_name) productCostMap.set(p.product_name.toLowerCase().trim(), p.cost);
+      }
+    }
+  } catch (mapErr) {
+    console.warn('Could not build product cost map for sales sync:', mapErr);
+  }
+
+  let receiptsToProcess = targetShopId 
     ? receipts.filter(r => !r.shop_id || r.shop_id === targetShopId)
     : receipts;
 
-  for (const receipt of filteredReceipts) {
+  // If strict shopId filter matched 0 receipts but user has valid receipts, fallback to all receipts
+  if (receiptsToProcess.length === 0 && receipts.length > 0) {
+    receiptsToProcess = receipts;
+  }
+
+  for (const receipt of receiptsToProcess) {
     const invoice = convertReceiptToSaleInvoice(
       receipt,
       businessId,
       ownerId,
       branchId || 'main',
-      settings
+      settings,
+      productCostMap
     );
 
     const safeDocId = `sp_${businessId}_${receipt.receipt_number.replace(/[^a-zA-Z0-9_-]/g, '_')}`;

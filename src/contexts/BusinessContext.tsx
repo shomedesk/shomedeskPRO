@@ -4,7 +4,7 @@ import { collection, query, where, onSnapshot, doc, getDoc, updateDoc, getDocs, 
 import { Business, Branch, UserProfile, BankAccount, Service } from '@/src/types';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { handleFirestoreError, OperationType } from '@/src/lib/firestore-utils';
-import { syncSalesPlaySalesToFirestore } from '@/src/services/salesplay';
+import { syncSalesPlaySalesToFirestore, syncAllSalesPlayCatalogToFirestore } from '@/src/services/salesplay';
 import { subDays } from 'date-fns';
 
 interface BusinessContextType {
@@ -23,6 +23,8 @@ interface BusinessContextType {
   setSelectedBranch: (branch: Branch | null) => void;
   setSelectedService: (service: Service | null) => void;
   setAllBusinessesSelected: (selected: boolean) => void;
+  syncSalesPlayData: (force?: boolean) => Promise<{ success: boolean; message: string }>;
+  isSyncingSalesPlay: boolean;
   loading: boolean;
 }
 
@@ -341,13 +343,13 @@ export function BusinessProvider({ children }: { children: React.ReactNode }) {
       // Fetch bank accounts for selected business + global accounts
       const targetBizId = selectedBusiness?.id || userProfile?.businessId || 'j2S1dqdU9W3WAdd7KXyk';
       
-      const baQuery = query(collection(db, 'bankAccounts'), where('businessId', '==', targetBizId));
+      const baQuery = query(collection(db, 'bankAccounts'), where('businessId', 'in', [targetBizId, 'global']));
 
       const unsubBa = onSnapshot(baQuery, (snapshot) => {
         const baList = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as BankAccount));
         // Filter for either the selected business or global accounts
         const filtered = baList.filter(ba => 
-          ba.businessId === 'global' || ba.businessId === targetBizId
+          ba.businessId === 'global' || ba.businessId === targetBizId || !ba.businessId
         );
         setBankAccounts(filtered.length > 0 ? filtered : baList);
         setLoading(false);
@@ -364,6 +366,41 @@ export function BusinessProvider({ children }: { children: React.ReactNode }) {
     }
   }, [selectedBusiness, isAllBusinessesSelected, businesses, userProfile]);
 
+  const [isSyncingSalesPlay, setIsSyncingSalesPlay] = useState(false);
+
+  // Manual or automatic sync function to keep SalesPlay POS products & sales 100% in sync
+  const syncSalesPlayData = async (_force?: boolean) => {
+    if (!selectedBusiness?.id || !user) {
+      return { success: false, message: 'No business selected' };
+    }
+    setIsSyncingSalesPlay(true);
+    try {
+      // 1. Sync full product catalog in background to ensure new SalesPlay items arrive directly in the webapp!
+      const catRes = await syncAllSalesPlayCatalogToFirestore(selectedBusiness.id);
+      
+      // 2. Sync sales receipts for the last 14 days
+      const now = new Date();
+      const start = subDays(now, 14);
+      const salesRes = await syncSalesPlaySalesToFirestore({
+        businessId: selectedBusiness.id,
+        ownerId: selectedBusiness.ownerId || user.uid,
+        branchId: selectedBranch?.id || 'main',
+        startDate: start,
+        endDate: now,
+      });
+
+      return {
+        success: true,
+        message: `Synced ${catRes.productCount} items and ${salesRes.importedCount} sales transactions from SalesPlay POS!`
+      };
+    } catch (err: any) {
+      console.warn('Notice during SalesPlay data sync:', err);
+      return { success: false, message: err?.message || 'Sync encountered a minor network issue' };
+    } finally {
+      setIsSyncingSalesPlay(false);
+    }
+  };
+
   // Auto-Sync SalesPlay POS on app load / business selection in background
   useEffect(() => {
     if (!selectedBusiness?.id || !user) return;
@@ -375,17 +412,8 @@ export function BusinessProvider({ children }: { children: React.ReactNode }) {
           console.log('App is offline, skipping background SalesPlay auto-sync');
           return;
         }
-        const now = new Date();
-        const start = subDays(now, 14); // Sync last 14 days
-        const res = await syncSalesPlaySalesToFirestore({
-          businessId: selectedBusiness!.id,
-          ownerId: selectedBusiness!.ownerId || user.uid,
-          branchId: selectedBranch?.id || 'kZW07zMAVPglK98ruycB',
-          startDate: start,
-          endDate: now,
-        });
-        if (!didCancel && res.success && res.importedCount > 0) {
-          console.log(`Auto-synced ${res.importedCount} SalesPlay receipts to Firestore 'sales' collection`);
+        if (!didCancel) {
+          await syncSalesPlayData(false);
         }
       } catch (err) {
         console.warn('Silent notice during background SalesPlay auto-sync:', err);
@@ -447,6 +475,8 @@ export function BusinessProvider({ children }: { children: React.ReactNode }) {
       setSelectedBranch,
       setSelectedService,
       setAllBusinessesSelected,
+      syncSalesPlayData,
+      isSyncingSalesPlay,
       isBranchAuthenticated,
       authenticateBranch,
       loading
