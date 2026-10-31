@@ -155,7 +155,7 @@ service cloud.firestore {
       return isValidAmount(data.amount) &&
              isValidString(data.category, 1, 100) &&
              isValidDescription(data.get('description', '')) &&
-             data.type in ['income', 'expense', 'transfer', 'withdraw', 'deposit'];
+             data.type in ['income', 'expense', 'transfer', 'withdraw', 'deposit', 'capital'];
     }
 
     function isValidBankAccount(data) {

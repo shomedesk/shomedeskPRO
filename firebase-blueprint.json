@@ -65,13 +65,15 @@
         "businessId": { "type": "string" },
         "branchId": { "type": "string" },
         "userId": { "type": "string" },
-        "type": { "type": "string", "enum": ["income", "expense", "transfer", "withdraw", "deposit"] },
+        "type": { "type": "string", "enum": ["income", "expense", "transfer", "withdraw", "deposit", "capital"] },
         "fromAccount": { "type": "string", "enum": ["cash", "bank"] },
         "toAccount": { "type": "string", "enum": ["cash", "bank"] },
         "amount": { "type": "number" },
         "category": { "type": "string" },
         "description": { "type": "string" },
         "reportId": { "type": "string" },
+        "isCapital": { "type": "boolean" },
+        "capitalSource": { "type": "string" },
         "date": { "type": "string", "format": "date-time" }
       },
       "required": ["businessId", "branchId", "type", "amount", "date"]

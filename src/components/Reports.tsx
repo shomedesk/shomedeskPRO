@@ -223,6 +223,12 @@ export default function Reports() {
     const netProfit = grossProfit - totalOperatingExpenses;
     const netMarginPercent = totalSales > 0 ? (netProfit / totalSales) * 100 : 0;
 
+    // Non-Operating Financing & Equity Inflows (Capital, Partner Investments, Loans)
+    // STRICT ACCOUNTING ENFORCEMENT: Never included in Operating Sales or P&L profit
+    const totalCapitalInflow = transactionsData
+      .filter(t => t.type === 'capital' || t.isCapital)
+      .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
     return {
       totalSales: toStrictDecimal3(totalSales),
       cashSales: toStrictDecimal3(cashSales),
@@ -236,8 +242,9 @@ export default function Reports() {
       bankExpenses: toStrictDecimal3(bankExpenses),
       netProfit: toStrictDecimal3(netProfit),
       netMarginPercent: Number(netMarginPercent.toFixed(1)),
+      totalCapitalInflow: toStrictDecimal3(totalCapitalInflow),
     };
-  }, [salesData, dailyReportsData, purchasesData, expensesData]);
+  }, [salesData, dailyReportsData, purchasesData, expensesData, transactionsData]);
 
   // 2. Store-wise Breakdown
   const storeWiseData = useMemo(() => {
@@ -441,7 +448,8 @@ export default function Reports() {
           { 'Metric': 'Operating Expenses (Cash)', 'Amount': pnlCalculations.cashExpenses },
           { 'Metric': 'Operating Expenses (Bank)', 'Amount': pnlCalculations.bankExpenses },
           { 'Metric': 'TOTAL OPERATING EXPENSES', 'Amount': pnlCalculations.totalOperatingExpenses },
-          { 'Metric': 'NET PROFIT', 'Amount': pnlCalculations.netProfit },
+          { 'Metric': 'NET OPERATING PROFIT', 'Amount': pnlCalculations.netProfit },
+          { 'Metric': 'Non-Operating Capital & Investment Inflows (Equity)', 'Amount': pnlCalculations.totalCapitalInflow },
         ];
       } else if (activeTab === 'daily') {
         exportRows = dailyReportsData.map(r => ({
@@ -850,6 +858,29 @@ export default function Reports() {
                       {currency} {formatAmount(pnlCalculations.netProfit, currency)}
                     </td>
                   </tr>
+
+                  {/* 6. NON-OPERATING CAPITAL & EQUITY INFLOWS */}
+                  <tr className="bg-purple-950/20 border-t border-purple-500/30">
+                    <td className="p-4 text-purple-300 uppercase font-black tracking-wider" colSpan={2}>
+                      <div className="flex items-center gap-2">
+                        <span>6. NON-OPERATING CAPITAL & FINANCING CASH INFLOWS</span>
+                        <span className="text-[9px] bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded font-black">
+                          Excluded from P&L Profit
+                        </span>
+                      </div>
+                    </td>
+                    <td className="p-4 text-right font-mono font-black text-purple-400">
+                      {currency} {formatAmount(pnlCalculations.totalCapitalInflow, currency)}
+                    </td>
+                  </tr>
+                  <tr className="hover:bg-purple-950/10 text-slate-400 text-[11px]">
+                    <td className="p-4 pl-8" colSpan={2}>
+                      Owner Capital, Partner Investments, Bank & Personal Loans directly added to liquidity
+                    </td>
+                    <td className="p-4 text-right font-mono text-purple-300">
+                      + {currency} {formatAmount(pnlCalculations.totalCapitalInflow, currency)}
+                    </td>
+                  </tr>
                 </tbody>
               </table>
             </div>
@@ -1160,10 +1191,11 @@ export default function Reports() {
                       <td className="p-4 uppercase text-[10px]">
                         <span className={cn(
                           "px-2 py-0.5 rounded font-black",
+                          t.type === 'capital' || t.isCapital ? "bg-purple-500/20 text-purple-300 border border-purple-500/30" :
                           t.type === 'income' ? "bg-emerald-500/10 text-emerald-400" :
                           t.type === 'expense' ? "bg-rose-500/10 text-rose-400" : "bg-blue-500/10 text-blue-400"
                         )}>
-                          {t.type}
+                          {t.type === 'capital' || t.isCapital ? 'CAPITAL / INVESTMENT' : t.type}
                         </span>
                       </td>
                       <td className="p-4 text-white font-bold">{t.category}</td>

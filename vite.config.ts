@@ -4,9 +4,16 @@ import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode, command }) => {
+  if (command === 'build') {
+    process.env.NODE_ENV = 'production';
+  }
+  const isProd = mode === 'production' || command === 'build';
   const env = loadEnv(mode, '.', '');
   return {
+    esbuild: {
+      jsxDev: !isProd,
+    },
     plugins: [
       react(), 
       tailwindcss(),
@@ -101,7 +108,7 @@ export default defineConfig(({ mode }) => {
     },
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY || ''),
-      'process.env.NODE_ENV': JSON.stringify(mode),
+      'process.env.NODE_ENV': JSON.stringify(isProd ? 'production' : 'development'),
     },
     server: {
       host: '0.0.0.0',

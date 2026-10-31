@@ -60,7 +60,7 @@ export interface UserProfile {
   isPlaceholder?: boolean;
 }
 
-export type TransactionType = 'income' | 'expense' | 'transfer' | 'withdraw' | 'deposit';
+export type TransactionType = 'income' | 'expense' | 'transfer' | 'withdraw' | 'deposit' | 'capital';
 export type AccountType = 'cash' | 'bank';
 
 export interface Transaction {
@@ -82,6 +82,8 @@ export interface Transaction {
   createdAt: any;
   isFromReport?: boolean;
   reportId?: string; // Link to DailyReport document ID
+  isCapital?: boolean;
+  capitalSource?: 'owner_equity' | 'partner_investment' | 'bank_loan' | 'investor_fund' | 'other' | string;
 }
 
 export interface Supplier {

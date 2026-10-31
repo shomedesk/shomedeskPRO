@@ -20,6 +20,8 @@ import {
   ArrowDownRight,
   Save,
   Trash2,
+  Coins,
+  CheckCircle2,
   X as XIcon
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
@@ -109,6 +111,21 @@ export default function FinanceManager({ accountType }: FinanceManagerProps) {
         return acc;
       }, 0);
 
+  // Operating Sales Income (From actual goods/services sold)
+  const operatingIncome = transactions
+    .filter(t => t.toAccount === accountType && t.type === 'income')
+    .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
+  // Capital & Investment Inflows (Owner equity, partner funds, bank loans - STRICTLY SEPARATED)
+  const capitalInflows = transactions
+    .filter(t => t.toAccount === accountType && (t.type === 'capital' || t.isCapital))
+    .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
+  // Total Outflows / Expenses
+  const totalOutflows = transactions
+    .filter(t => t.fromAccount === accountType)
+    .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+
   const openModal = (type: TransactionType) => {
     setModalType(type);
     setIsModalOpen(true);
@@ -116,6 +133,22 @@ export default function FinanceManager({ accountType }: FinanceManagerProps) {
 
   const isAdmin = userProfile?.role === 'admin' || auth.currentUser?.email === 'shomedesk@gmail.com';
   const currency = isAllBusinessesSelected ? 'OMR' : (selectedBranch?.currency || selectedBusiness?.currency || 'OMR');
+
+  const handleConvertToCapital = async (t: Transaction) => {
+    if (!t.id || !isAdmin) return;
+    try {
+      await updateDoc(doc(db, 'transactions', t.id), {
+        type: 'capital',
+        isCapital: true,
+        category: t.category.toLowerCase().includes('capital') || t.category.toLowerCase().includes('investment') 
+          ? t.category 
+          : `Capital / Investment (${t.category})`,
+      });
+      toast.success('Transaction converted to Capital / Investment! It is now excluded from operating income.');
+    } catch (err) {
+      toast.error('Failed to update transaction');
+    }
+  };
 
   const handleDeleteTransaction = async (t: Transaction) => {
     if (!t.id || !isAdmin) return;
@@ -186,6 +219,69 @@ export default function FinanceManager({ accountType }: FinanceManagerProps) {
         </div>
       </div>
 
+      {/* Financial Overview Cards separating Operating Income from Capital & Equity Inflows */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+        <div className="bg-[#1E293B] p-4 rounded-2xl border border-slate-800 shadow-lg">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest">
+              Total {accountType === 'cash' ? 'Cash' : 'Bank'} Balance
+            </span>
+            <div className={cn("p-1.5 rounded-lg", accountType === 'cash' ? "bg-amber-500/10 text-amber-400" : "bg-blue-500/10 text-blue-400")}>
+              {accountType === 'cash' ? <Wallet size={16} /> : <Landmark size={16} />}
+            </div>
+          </div>
+          <p className={cn("text-lg md:text-2xl font-black font-mono tracking-tight", balance >= 0 ? "text-emerald-400" : "text-rose-400")}>
+            {currency} {formatAmount(balance, currency)}
+          </p>
+          <p className="text-[9px] text-slate-500 font-bold mt-1">Current liquid funds</p>
+        </div>
+
+        <div className="bg-[#1E293B] p-4 rounded-2xl border border-slate-800 shadow-lg">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest">
+              Operating Sales Income
+            </span>
+            <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400">
+              <TrendingUp size={16} />
+            </div>
+          </div>
+          <p className="text-lg md:text-2xl font-black font-mono tracking-tight text-emerald-400">
+            {currency} {formatAmount(operatingIncome, currency)}
+          </p>
+          <p className="text-[9px] text-slate-500 font-bold mt-1">From products & services</p>
+        </div>
+
+        <div className="bg-[#1E293B] p-4 rounded-2xl border border-purple-500/30 bg-purple-500/5 shadow-lg">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] md:text-[10px] font-black text-purple-300 uppercase tracking-widest">
+              Capital & Investments
+            </span>
+            <div className="p-1.5 rounded-lg bg-purple-500/20 text-purple-400">
+              <Coins size={16} />
+            </div>
+          </div>
+          <p className="text-lg md:text-2xl font-black font-mono tracking-tight text-purple-400">
+            {currency} {formatAmount(capitalInflows, currency)}
+          </p>
+          <p className="text-[9px] text-purple-300/70 font-bold mt-1">Owner equity & loans (Non-operating)</p>
+        </div>
+
+        <div className="bg-[#1E293B] p-4 rounded-2xl border border-slate-800 shadow-lg">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest">
+              Total Outflows / Expenses
+            </span>
+            <div className="p-1.5 rounded-lg bg-rose-500/10 text-rose-400">
+              <TrendingDown size={16} />
+            </div>
+          </div>
+          <p className="text-lg md:text-2xl font-black font-mono tracking-tight text-rose-400">
+            {currency} {formatAmount(totalOutflows, currency)}
+          </p>
+          <p className="text-[9px] text-slate-500 font-bold mt-1">Paid expenses & transfers</p>
+        </div>
+      </div>
+
       {accountType === 'bank' && (
         <div className="space-y-3 md:space-y-4">
           <div className="flex items-center justify-between">
@@ -226,8 +322,9 @@ export default function FinanceManager({ accountType }: FinanceManagerProps) {
       )}
 
       {userProfile?.role !== 'accountant' && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
-          <ActionButton onClick={() => openModal('income')} label="Income" icon={<Plus size={18} className="md:w-5 md:h-5" />} color="bg-emerald-600 shadow-emerald-900/20" />
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 md:gap-4">
+          <ActionButton onClick={() => openModal('capital')} label="Add Capital / Investment" icon={<Coins size={18} className="md:w-5 md:h-5 text-purple-300" />} color="bg-gradient-to-r from-purple-600 to-indigo-600 shadow-purple-900/30 ring-1 ring-purple-400/40" />
+          <ActionButton onClick={() => openModal('income')} label="Income (Sales)" icon={<Plus size={18} className="md:w-5 md:h-5" />} color="bg-emerald-600 shadow-emerald-900/20" />
           <ActionButton onClick={() => openModal('expense')} label="Expense" icon={<Minus size={18} className="md:w-5 md:h-5" />} color="bg-rose-600 shadow-rose-900/20" />
           <ActionButton onClick={() => openModal('transfer')} label="Transfer" icon={<ArrowRightLeft size={18} className="md:w-5 md:h-5" />} color="bg-blue-600 shadow-blue-900/20" />
           <ActionButton onClick={() => openModal('withdraw')} label="Withdraw" icon={<ArrowDownRight size={18} className="md:w-5 md:h-5" />} color="bg-indigo-600 shadow-indigo-900/20" />
@@ -250,6 +347,7 @@ export default function FinanceManager({ accountType }: FinanceManagerProps) {
               currency={currency}
               isAdmin={isAdmin}
               onDelete={handleDeleteTransaction}
+              onConvertToCapital={handleConvertToCapital}
             />
           ))}
           {transactions.length === 0 && (
@@ -410,11 +508,21 @@ interface TransactionItemProps {
   currency: string;
   isAdmin?: boolean;
   onDelete?: (t: Transaction) => void;
+  onConvertToCapital?: (t: Transaction) => void;
 }
 
-const TransactionItem: React.FC<TransactionItemProps> = ({ transaction, currentAccount, currency, isAdmin, onDelete }) => {
+const TransactionItem: React.FC<TransactionItemProps> = ({ 
+  transaction, 
+  currentAccount, 
+  currency, 
+  isAdmin, 
+  onDelete,
+  onConvertToCapital 
+}) => {
   const isIncoming = transaction.toAccount === currentAccount;
+  const isCapital = transaction.type === 'capital' || transaction.isCapital;
   const [deleting, setDeleting] = useState(false);
+  const [converting, setConverting] = useState(false);
 
   const handleDelete = async () => {
     if (!onDelete) return;
@@ -425,26 +533,67 @@ const TransactionItem: React.FC<TransactionItemProps> = ({ transaction, currentA
       setDeleting(false);
     }
   };
+
+  const handleConvert = async () => {
+    if (!onConvertToCapital) return;
+    setConverting(true);
+    try {
+      await onConvertToCapital(transaction);
+    } finally {
+      setConverting(false);
+    }
+  };
   
   return (
-    <div className="p-4 flex justify-between items-center hover:bg-slate-800/50 transition-colors">
-      <div className="flex items-center gap-4">
+    <div className="p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 hover:bg-slate-800/50 transition-colors">
+      <div className="flex items-center gap-3 md:gap-4">
         <div className={cn(
-          "p-2 rounded-xl",
-          isIncoming ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"
+          "p-2 rounded-xl flex-shrink-0",
+          isCapital
+            ? "bg-purple-500/10 text-purple-400 border border-purple-500/20"
+            : isIncoming 
+            ? "bg-emerald-500/10 text-emerald-400" 
+            : "bg-rose-500/10 text-rose-400"
         )}>
-          {isIncoming ? <ArrowUpRight size={20} /> : <ArrowDownRight size={20} />}
+          {isCapital ? <Coins size={20} /> : isIncoming ? <ArrowUpRight size={20} /> : <ArrowDownRight size={20} />}
         </div>
         <div>
-          <p className="text-sm font-bold text-slate-200">{transaction.category}</p>
-          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-            {transaction.description || transaction.type} • {format(new Date(transaction.date), 'MMM dd, HH:mm')}
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-bold text-slate-200">{transaction.category}</p>
+            {isCapital && (
+              <span className="px-1.5 py-0.5 bg-purple-500/20 text-purple-300 border border-purple-500/30 rounded text-[8px] font-black uppercase tracking-wider">
+                Capital / Equity
+              </span>
+            )}
+            {transaction.type === 'income' && !isCapital && (
+              <span className="px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[8px] font-black uppercase tracking-wider">
+                Sales Income
+              </span>
+            )}
+          </div>
+          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mt-0.5">
+            {transaction.description || (isCapital ? 'Capital / Investment Deposit' : transaction.type)} • {format(new Date(transaction.date), 'MMM dd, HH:mm')}
           </p>
         </div>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center justify-between sm:justify-end gap-3 w-full sm:w-auto">
+        {isAdmin && onConvertToCapital && transaction.type === 'income' && (
+          <button
+            type="button"
+            disabled={converting}
+            onClick={handleConvert}
+            className="px-2 py-1 bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 rounded-lg text-[9px] font-bold transition-all cursor-pointer active:scale-95 disabled:opacity-50 flex items-center gap-1"
+            title="Convert to Capital / Investment so this amount is NOT counted as operating revenue or sales profit"
+          >
+            <Coins size={11} />
+            <span>{converting ? 'Converting...' : 'Mark as Capital'}</span>
+          </button>
+        )}
         <div className="text-right">
-          <p className={cn("text-sm font-black font-mono", isIncoming ? "text-emerald-400" : "text-rose-400")}>
+          <p className={cn(
+            "text-sm font-black font-mono", 
+            isCapital ? "text-purple-400" : isIncoming ? "text-emerald-400" : "text-rose-400"
+          )}>
             {isIncoming ? '+' : '-'} {currency} {formatAmount(transaction.amount, currency)}
           </p>
         </div>
@@ -466,11 +615,13 @@ const TransactionItem: React.FC<TransactionItemProps> = ({ transaction, currentA
 
 function TransactionModal({ type, accountType, onClose }: { type: TransactionType; accountType: AccountType; onClose: () => void }) {
   const { selectedBusiness, isAllBusinessesSelected, selectedBranch, selectedService, bankAccounts, businesses, branches, services } = useBusiness();
+  const [destinationAccount, setDestinationAccount] = useState<AccountType>(accountType);
+  const [capitalSource, setCapitalSource] = useState<string>('owner_equity');
   const [amount, setAmount] = useState('');
-  const [category, setCategory] = useState('');
+  const [category, setCategory] = useState(type === 'capital' ? 'Owner Capital / Investment' : '');
   const [description, setDescription] = useState('');
   const [fromBankId, setFromBankId] = useState('');
-  const [toBankId, setToBankId] = useState('');
+  const [toBankId, setToBankId] = useState(bankAccounts[0]?.id || '');
   const [targetBusinessId, setTargetBusinessId] = useState('');
   const [targetBranchId, setTargetBranchId] = useState('');
   const [targetServiceId, setTargetServiceId] = useState('');
@@ -515,6 +666,11 @@ function TransactionModal({ type, accountType, onClose }: { type: TransactionTyp
     setLoading(true);
     try {
       const amt = parseFloat(amount);
+      if (isNaN(amt) || amt <= 0) {
+        toast.error('Please enter a valid amount greater than 0');
+        setLoading(false);
+        return;
+      }
       let businessId = isAllBusinessesSelected ? (targetBusinessId || 'global') : selectedBusiness!.id;
       
       // For transfers between business and company banks, associate with the business so it shows in branch history
@@ -530,7 +686,7 @@ function TransactionModal({ type, accountType, onClose }: { type: TransactionTyp
         ownerId: selectedBusiness?.ownerId || auth.currentUser.uid,
         userId: auth.currentUser.uid,
         amount: amt,
-        category: category || type.toUpperCase(),
+        category: category || (type === 'capital' ? 'Owner Capital / Investment' : type.toUpperCase()),
         description,
         date: new Date().toISOString(),
         createdAt: serverTimestamp(),
@@ -538,7 +694,40 @@ function TransactionModal({ type, accountType, onClose }: { type: TransactionTyp
 
       const batch = writeBatch(db);
 
-      if (type === 'income') {
+      if (type === 'capital') {
+        const destAccount = destinationAccount || accountType;
+        const transactionRef = doc(collection(db, 'transactions'));
+        const effectiveCategory = category.trim() || 
+          (capitalSource === 'owner_equity' ? 'Owner Capital / Investment' :
+           capitalSource === 'partner_investment' ? 'Partner Investment' :
+           capitalSource === 'bank_loan' ? 'Bank / Business Loan' :
+           capitalSource === 'personal_loan' ? 'Personal / Investor Loan' :
+           'Capital / Investment Injection');
+
+        const transaction: Transaction = {
+          ...commonData,
+          businessId,
+          branchId: isAllBusinessesSelected ? (targetBranchId || 'global') : (selectedBranch?.id || 'global'),
+          serviceId: isAllBusinessesSelected ? (targetServiceId || 'global') : (selectedService?.id || 'global'),
+          type: 'capital',
+          category: effectiveCategory,
+          toAccount: destAccount,
+          isCapital: true,
+          capitalSource,
+        };
+
+        if (destAccount === 'bank') {
+          const effectiveToBankId = toBankId || bankAccounts[0]?.id;
+          if (!effectiveToBankId) {
+            toast.error('Please select a destination bank account');
+            setLoading(false);
+            return;
+          }
+          transaction.toBankId = effectiveToBankId;
+          batch.update(doc(db, 'bankAccounts', effectiveToBankId), { balance: increment(amt) });
+        }
+        batch.set(transactionRef, transaction);
+      } else if (type === 'income') {
         const transactionRef = doc(collection(db, 'transactions'));
         const transaction: Transaction = {
           ...commonData,
@@ -770,11 +959,91 @@ function TransactionModal({ type, accountType, onClose }: { type: TransactionTyp
             {type === 'income' && <Plus className="text-emerald-400" />}
             {type === 'expense' && <Minus className="text-rose-400" />}
             {type === 'transfer' && <ArrowRightLeft className="text-blue-400" />}
-            {type} {accountType}
+            {type === 'capital' && <Coins className="text-purple-400" />}
+            {type === 'capital' ? 'Add Capital / Investment' : `${type} ${accountType}`}
           </h2>
           <button onClick={onClose} className="text-slate-400 hover:text-white"><XIcon size={20} /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-4 md:p-6 space-y-4 overflow-y-auto flex-1 custom-scrollbar">
+          {type === 'capital' && (
+            <div className="p-3.5 bg-purple-500/10 border border-purple-500/30 rounded-2xl flex items-start gap-3">
+              <Coins className="text-purple-400 w-5 h-5 flex-shrink-0 mt-0.5" />
+              <div className="text-xs text-purple-200">
+                <p className="font-bold text-white flex items-center gap-1.5">
+                  Non-Operating Equity / Capital Injection
+                  <span className="text-[9px] bg-purple-500/20 text-purple-300 px-1.5 py-0.2 rounded font-black">Strict Accounting</span>
+                </p>
+                <p className="text-[11px] text-purple-300/80 mt-1 leading-relaxed">
+                  This money will directly fund your {destinationAccount === 'cash' ? 'Cash Drawer' : 'Bank Account'} balance without inflating your Sales Revenue, Gross Profit, or Net Operating Profit.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {type === 'capital' && (
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Deposit Destination</label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDestinationAccount('cash')}
+                  className={cn(
+                    "p-3 rounded-xl border flex items-center justify-center gap-2 text-xs font-black transition-all cursor-pointer",
+                    destinationAccount === 'cash'
+                      ? "bg-amber-500/20 border-amber-500 text-amber-400 shadow-md"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
+                  )}
+                >
+                  <Wallet size={16} />
+                  <span>Cash Drawer</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDestinationAccount('bank')}
+                  className={cn(
+                    "p-3 rounded-xl border flex items-center justify-center gap-2 text-xs font-black transition-all cursor-pointer",
+                    destinationAccount === 'bank'
+                      ? "bg-blue-500/20 border-blue-500 text-blue-400 shadow-md"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
+                  )}
+                >
+                  <Landmark size={16} />
+                  <span>Bank Account</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {type === 'capital' && (
+            <div className="space-y-2">
+              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Capital / Investment Source</label>
+              <select
+                value={capitalSource}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setCapitalSource(val);
+                  const labels: Record<string, string> = {
+                    owner_equity: 'Owner Capital / Investment',
+                    partner_investment: 'Partner Investment',
+                    bank_loan: 'Bank / Business Loan',
+                    personal_loan: 'Personal Loan / Debt',
+                    investor_fund: 'Investor Equity Fund',
+                    other: 'Other Capital Injection',
+                  };
+                  setCategory(labels[val] || 'Capital Injection');
+                }}
+                className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 text-sm outline-none focus:border-blue-500 font-bold"
+              >
+                <option value="owner_equity">Owner Capital / Investment (মালিকের নিজস্ব মূলধন)</option>
+                <option value="partner_investment">Partner Investment (অংশীদারের বিনিয়োগ)</option>
+                <option value="bank_loan">Bank / Commercial Loan (ব্যবসায়িক / ব্যাংক লোন)</option>
+                <option value="personal_loan">Personal Loan (ব্যক্তিগত ঋণ)</option>
+                <option value="investor_fund">Investor Equity (ইনভেস্টর ফান্ড)</option>
+                <option value="other">Other Capital Injection (অন্যান্য মূলধন)</option>
+              </select>
+            </div>
+          )}
+
           {type === 'transfer' && (
             <div className="space-y-2">
               <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Transfer Type</label>
@@ -897,17 +1166,18 @@ function TransactionModal({ type, accountType, onClose }: { type: TransactionTyp
             {/* To Bank selector */}
             {(
               (type === 'income' && accountType === 'bank') ||
+              (type === 'capital' && destinationAccount === 'bank') ||
               (type === 'transfer' && (transferType === 'cash-to-bank' || transferType === 'bank-to-bank' || transferType === 'business-to-company' || transferType === 'company-to-business'))
             ) && (
               <div className="space-y-2 col-span-2 sm:col-span-1">
-                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">To Bank</label>
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">To Bank Account</label>
                 <select 
                   required
                   value={toBankId}
                   onChange={(e) => setToBankId(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-4 text-sm outline-none focus:border-blue-500"
                 >
-                  <option value="">Select Bank</option>
+                  <option value="">Select Bank Account</option>
                   {transferType === 'business-to-company' ? companyBanks.map(b => <option key={b.id} value={b.id}>{b.bankName} ({b.accountName})</option>) :
                    transferType === 'company-to-business' ? businessBanks.map(b => <option key={b.id} value={b.id}>{b.bankName} ({b.accountName})</option>) :
                    bankAccounts.map(b => <option key={b.id} value={b.id}>{b.bankName} ({b.accountName})</option>)}
@@ -958,10 +1228,15 @@ function TransactionModal({ type, accountType, onClose }: { type: TransactionTyp
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-black py-4 px-6 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 shadow-lg shadow-blue-900/20"
+            className={cn(
+              "w-full disabled:opacity-50 text-white font-black py-4 px-6 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-95 shadow-lg",
+              type === 'capital' 
+                ? "bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-900/30" 
+                : "bg-blue-600 hover:bg-blue-500 shadow-blue-900/20"
+            )}
           >
-            {loading ? <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-b-2 border-white"></div> : <Save size={20} />}
-            Record Transaction
+            {loading ? <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-b-2 border-white"></div> : type === 'capital' ? <Coins size={20} /> : <Save size={20} />}
+            {type === 'capital' ? 'Deposit Capital / Investment' : 'Record Transaction'}
           </button>
         </form>
       </div>

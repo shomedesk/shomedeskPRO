@@ -39,7 +39,6 @@ import { useBusiness } from '@/src/contexts/BusinessContext';
 import NotificationCenter from './NotificationCenter';
 import CurrencyTicker from './CurrencyTicker';
 import BusinessAssistant from './BusinessAssistant';
-import { PWAInstallButton } from './PWAInstallButton';
 
 export default function Layout() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(typeof window !== 'undefined' ? window.innerWidth >= 1024 : false);
@@ -373,7 +372,6 @@ export default function Layout() {
                 <RefreshCw size={13} className={cn(isSyncingSalesPlay && "animate-spin")} />
                 <span className="hidden sm:inline">{isSyncingSalesPlay ? 'Syncing...' : 'Sync POS'}</span>
               </button>
-              <PWAInstallButton />
               <NotificationCenter />
               <div className="h-6 md:h-8 w-px bg-slate-800" />
               <div className="flex items-center gap-2 md:gap-3">
