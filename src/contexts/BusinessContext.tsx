@@ -55,11 +55,11 @@ export function BusinessProvider({ children }: { children: React.ReactNode }) {
     setIsAllBusinessesSelected(false);
     _setSelectedBranch(null);
     _setSelectedService(null);
-    if (user && business && userProfile?.role !== 'branch_manager') {
+    if (user && business && userProfile?.role !== 'branch_manager' && userProfile?.businessId !== business.id) {
       try {
         await updateDoc(doc(db, 'users', user.uid), { businessId: business.id });
       } catch (error) {
-        console.error('Failed to update user profile businessId:', error);
+        console.warn('Notice updating user profile businessId:', error);
       }
     }
   };
@@ -67,17 +67,17 @@ export function BusinessProvider({ children }: { children: React.ReactNode }) {
   const setSelectedBranch = async (branch: Branch | null) => {
     _setSelectedBranch(branch);
     if (branch) _setSelectedService(null);
-    if (user && branch && userProfile?.role !== 'branch_manager') {
+    if (user && branch && userProfile?.role !== 'branch_manager' && userProfile?.branchId !== branch.id) {
       try {
         await updateDoc(doc(db, 'users', user.uid), { branchId: branch.id });
       } catch (error) {
-        console.error('Failed to update user profile branchId:', error);
+        console.warn('Notice updating user profile branchId:', error);
       }
-    } else if (user && !branch && userProfile?.role !== 'branch_manager') {
+    } else if (user && !branch && userProfile?.role !== 'branch_manager' && userProfile?.branchId) {
       try {
         await updateDoc(doc(db, 'users', user.uid), { branchId: null });
       } catch (error) {
-        console.error('Failed to clear user profile branchId:', error);
+        console.warn('Notice clearing user profile branchId:', error);
       }
     }
   };
@@ -91,6 +91,7 @@ export function BusinessProvider({ children }: { children: React.ReactNode }) {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   
   const nestedUnsubRef = useRef<Unsubscribe | null>(null);
+  const hasAttemptedAdminFix = useRef(false);
 
   useEffect(() => {
     if (!user) {
@@ -115,16 +116,19 @@ export function BusinessProvider({ children }: { children: React.ReactNode }) {
       if (docSnap.exists()) {
         const profile = docSnap.data() as UserProfile;
         
-        // Auto-fix: if admin and ownedBusinessIds is missing
-        if (profile.role === 'admin' && !profile.ownedBusinessIds) {
+        // Auto-fix: if admin and ownedBusinessIds is missing (run once only)
+        if (profile.role === 'admin' && !profile.ownedBusinessIds && !hasAttemptedAdminFix.current) {
+          hasAttemptedAdminFix.current = true;
           try {
             const bQuery = query(collection(db, 'businesses'), where('ownerId', '==', user.uid));
             const bSnap = await getDocs(bQuery);
             const ids = bSnap.docs.map(d => d.id);
-            await updateDoc(doc(db, 'users', user.uid), { ownedBusinessIds: ids });
-            profile.ownedBusinessIds = ids;
+            if (ids.length > 0) {
+              await updateDoc(doc(db, 'users', user.uid), { ownedBusinessIds: ids });
+              profile.ownedBusinessIds = ids;
+            }
           } catch (err) {
-            console.error('Failed to auto-fix ownedBusinessIds:', err);
+            console.warn('Notice on ownedBusinessIds check:', err);
           }
         }
         
@@ -401,34 +405,8 @@ export function BusinessProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  // Auto-Sync SalesPlay POS on app load / business selection in background
-  useEffect(() => {
-    if (!selectedBusiness?.id || !user) return;
-    let didCancel = false;
-
-    async function autoSync() {
-      try {
-        if (typeof navigator !== 'undefined' && !navigator.onLine) {
-          console.log('App is offline, skipping background SalesPlay auto-sync');
-          return;
-        }
-        if (!didCancel) {
-          await syncSalesPlayData(false);
-        }
-      } catch (err) {
-        console.warn('Silent notice during background SalesPlay auto-sync:', err);
-      }
-    }
-
-    const timer = setTimeout(() => {
-      autoSync();
-    }, 1500);
-
-    return () => {
-      didCancel = true;
-      clearTimeout(timer);
-    };
-  }, [selectedBusiness?.id, selectedBranch?.id, user]);
+  // SalesPlay POS synchronization is triggered on demand (e.g. user clicks "Import" or "Sync")
+  // to protect Firestore free tier daily write limits.
 
   const isPrivilegedRole = 
     userProfile?.role === 'admin' ||

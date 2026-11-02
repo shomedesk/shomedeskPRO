@@ -52,9 +52,8 @@ export default function FinanceManager({ accountType }: FinanceManagerProps) {
       q = query(
         collection(db, 'transactions'),
         where('businessId', '==', selectedBusiness!.id),
-        ...(selectedBranch ? [where('branchId', '==', selectedBranch.id)] : []),
         orderBy('date', 'desc'),
-        limit(100)
+        limit(200)
       );
     }
 
@@ -75,10 +74,11 @@ export default function FinanceManager({ accountType }: FinanceManagerProps) {
         }));
       }
 
-      // Filter transactions relevant to this account type
+      // Filter transactions relevant to this account type and branch
       const filtered = data.filter(t => {
+        const isBranchMatch = !selectedBranch || isAllBusinessesSelected || !t.branchId || t.branchId === 'global' || t.branchId === 'main' || t.branchId === selectedBranch.id;
         const isCorrectAccount = t.fromAccount === accountType || t.toAccount === accountType;
-        return isCorrectAccount;
+        return isBranchMatch && isCorrectAccount;
       });
 
       setTransactions(filtered);

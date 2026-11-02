@@ -359,30 +359,8 @@ service cloud.firestore {
     }
 
     match /transactions/{transactionId} {
-      allow read: if isAuthenticated() && (
-        isAdmin() || 
-        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
-        ('userId' in resource.data && resource.data.userId == request.auth.uid) || 
-        ('businessId' in resource.data && belongsToBusiness(resource.data.businessId))
-      );
-      allow create: if isAuthenticated() && (
-        isAdmin() ||
-        (!('businessId' in request.resource.data) || canWriteBusiness(request.resource.data.businessId))
-      ) && isValidTransaction(request.resource.data);
-      allow update: if isAuthenticated() && (
-        isAdmin() || (
-          (!('businessId' in resource.data) || canWriteBusiness(resource.data.businessId)) &&
-          (!('ownerId' in resource.data) || !('ownerId' in request.resource.data) || request.resource.data.ownerId == resource.data.ownerId) &&
-          (!('businessId' in resource.data) || !('businessId' in request.resource.data) || request.resource.data.businessId == resource.data.businessId) &&
-          isValidTransaction(request.resource.data)
-        )
-      );
-      allow delete: if isAuthenticated() && (
-        isAdmin() || 
-        ('ownerId' in resource.data && resource.data.ownerId == request.auth.uid) || 
-        ('userId' in resource.data && resource.data.userId == request.auth.uid) || 
-        ('businessId' in resource.data && canWriteBusiness(resource.data.businessId))
-      );
+      allow read, write: if isAuthenticated();
+      allow delete: if isAdmin() || isDefaultAdmin();
     }
 
     match /dailyReports/{reportId} {
@@ -516,6 +494,11 @@ service cloud.firestore {
     }
 
     match /salesPlayCatalog/{productId} {
+      allow read, write: if isAuthenticated();
+      allow delete: if isAdmin() || isDefaultAdmin();
+    }
+
+    match /salesPlaySync/{docId} {
       allow read, write: if isAuthenticated();
       allow delete: if isAdmin() || isDefaultAdmin();
     }

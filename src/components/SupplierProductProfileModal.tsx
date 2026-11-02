@@ -8,7 +8,12 @@ import {
   removeProductFromSupplier, 
   syncSupplierProductsFromHistory 
 } from '@/src/services/supplierProductService';
-import { fetchSalesPlayProductsWithInventory, fetchSalesPlayCategories } from '@/src/services/salesplay';
+import {
+  fetchSalesPlayProductsWithInventory,
+  fetchSalesPlayCategories,
+  updateSalesPlayProductCosts,
+  getSalesPlaySettings,
+} from '@/src/services/salesplay';
 import { formatAmount } from '@/src/lib/currencyUtils';
 import { 
   Package, 
@@ -158,6 +163,23 @@ export function SupplierProductProfileModal({
         }
       );
 
+      // Also register or update product cost in SalesPlay POS
+      if (manualCost > 0) {
+        try {
+          const spSettings = await getSalesPlaySettings(businessId);
+          await updateSalesPlayProductCosts([{
+            barcode: barcodeToUse,
+            name: manualName.trim(),
+            category: categoryToUse,
+            unitCost: Number(manualCost),
+            salesPrice: Number(manualSalesPrice) || 0,
+            shopId: spSettings.selectedShopId,
+          }], spSettings.apiToken, spSettings.selectedShopId);
+        } catch (spErr) {
+          console.warn('Notice syncing manual product cost to SalesPlay:', spErr);
+        }
+      }
+
       toast.success(`Product "${manualName.trim()}" added to ${supplier.name}'s profile!`);
       // Reset form
       setManualName('');
@@ -234,13 +256,33 @@ export function SupplierProductProfileModal({
     if (!supplier.id || !selectedCatalogProduct) return;
     setAddingProduct(true);
     try {
+      const effectiveCost = customCost > 0 ? customCost : selectedCatalogProduct.cost;
       await linkProductToSupplier(
         supplier.id,
         supplier.name,
         businessId,
         selectedCatalogProduct,
-        customCost > 0 ? customCost : selectedCatalogProduct.cost
+        effectiveCost
       );
+
+      // Also sync updated cost to SalesPlay POS if custom cost was specified
+      if (customCost > 0) {
+        try {
+          const spSettings = await getSalesPlaySettings(businessId);
+          await updateSalesPlayProductCosts([{
+            productId: selectedCatalogProduct.id,
+            productCode: selectedCatalogProduct.product_code,
+            barcode: selectedCatalogProduct.barcode,
+            name: selectedCatalogProduct.product_name,
+            unitCost: customCost,
+            salesPrice: selectedCatalogProduct.price,
+            shopId: spSettings.selectedShopId,
+          }], spSettings.apiToken, spSettings.selectedShopId);
+        } catch (spErr) {
+          console.warn('Notice syncing custom cost to SalesPlay:', spErr);
+        }
+      }
+
       toast.success(`Added "${selectedCatalogProduct.product_name}" to supplier catalog!`);
       setSelectedCatalogProduct(null);
       setCatalogSearch('');

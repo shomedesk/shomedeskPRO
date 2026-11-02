@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp, collection, getDocs, query, where } from 'firebase/firestore';
 import { db } from '@/src/lib/firebase';
 import { SalesPlayProduct, SalesPlayCategory, SalesPlayShop, SalesPlaySettings, SaleInvoice, SaleItem } from '@/src/types';
 import { format, subDays, addDays, differenceInDays } from 'date-fns';
@@ -169,18 +169,6 @@ export async function fetchSalesPlayCategories(
           // ignore
         }
       }
-
-      // Sync to Firestore in the background
-      try {
-        setDoc(doc(db, 'salesPlayCatalog', 'categories'), {
-          categories: data.categories,
-          count: data.categories.length,
-          updatedAt: new Date().toISOString(),
-        }, { merge: true }).catch(() => {});
-      } catch {
-        // ignore
-      }
-
       return data.categories;
     }
   } catch (error) {
@@ -296,17 +284,6 @@ export async function fetchSalesPlayProductsWithInventory(
         }
       } catch (e) {
         // ignore storage errors
-      }
-
-      // Sync to Firestore in the background for persistent cross-device access on launched sites
-      try {
-        setDoc(doc(db, 'salesPlayCatalog', 'all_products'), {
-          products,
-          count: products.length,
-          updatedAt: new Date().toISOString(),
-        }, { merge: true }).catch(() => {});
-      } catch {
-        // ignore
       }
 
       return products;
@@ -540,6 +517,310 @@ export async function updateSalesPlayInventory(
   }
 }
 
+export interface SalesPlayProductCostUpdate {
+  productId?: string;
+  productCode?: string;
+  barcode?: string;
+  name?: string;
+  unitCost: number; // Retail cost per piece (OMR, e.g. 0.042)
+  salesPrice?: number; // Retail selling price per piece (OMR)
+  category?: string;
+  shopId?: string;
+}
+
+/**
+ * Updates retail product costs in SalesPlay POS via POST /products.
+ * SalesPlay tracks cost at the product level for COGS and gross margin reporting in POS receipts.
+ * Automatically handles retail pieces calculation (e.g. 1 pack = 24 pcs @ 1.000 OMR = 0.042 OMR/piece).
+ */
+export async function updateSalesPlayProductCosts(
+  itemsToUpdate: SalesPlayProductCostUpdate[],
+  token?: string,
+  shopId?: string
+): Promise<{ success: boolean; message: string; updatedCount: number }> {
+  if (!itemsToUpdate || itemsToUpdate.length === 0) {
+    return { success: true, message: 'No items to update costs for', updatedCount: 0 };
+  }
+
+  const authToken = token || DEFAULT_SALESPLAY_CONFIG.apiToken;
+  const targetShop = shopId || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+  const validItems = itemsToUpdate.filter(i => {
+    const cost = Number(i.unitCost);
+    return !isNaN(cost) && cost >= 0 && (i.productId || i.productCode || i.barcode || (i.name && i.name.trim().length > 0));
+  });
+
+  if (validItems.length === 0) {
+    return { success: true, message: 'No items with valid costs to update', updatedCount: 0 };
+  }
+
+  try {
+    // 1. Fetch current raw products from SalesPlay proxy
+    const prodData = await safeFetchSalesPlayJson<{ products?: any[] }>('/products', {
+      headers: {
+        'Authorization': `Bearer ${authToken}`,
+      },
+    });
+
+    const rawProducts = prodData?.products || [];
+    let updatedCount = 0;
+
+    for (const item of validItems) {
+      const perPieceCost = toStrictDecimal3(item.unitCost);
+      const cleanBarcode = (item.barcode || '').trim();
+      const cleanCode = (item.productCode || '').trim();
+      const cleanName = (item.name || '').trim().toLowerCase();
+
+      // Find matching product in SalesPlay
+      const matched = rawProducts.find((p: any) => {
+        if (item.productId && p.id === item.productId) return true;
+        if (cleanBarcode && p.barcode && p.barcode.trim() === cleanBarcode) return true;
+        if (cleanCode && p.product_code && p.product_code.trim() === cleanCode) return true;
+        if (cleanName && p.product_name && p.product_name.trim().toLowerCase() === cleanName) return true;
+        return false;
+      });
+
+      let postPayload: any = null;
+
+      if (matched) {
+        let shops = Array.isArray(matched.shops) ? matched.shops.map((s: any) => {
+          let price = Number(s.price) || 0;
+          if (s.shop_id === targetShop && item.salesPrice !== undefined && Number(item.salesPrice) > 0) {
+            price = toStrictDecimal3(item.salesPrice);
+          }
+          return {
+            shop_id: s.shop_id,
+            price,
+            available_for_sale: s.available_for_sale ?? true,
+            safety_stock: Number(s.safety_stock) || 0,
+          };
+        }) : [];
+
+        if (shops.length === 0) {
+          shops = [{
+            shop_id: targetShop,
+            price: item.salesPrice !== undefined && Number(item.salesPrice) > 0 ? toStrictDecimal3(item.salesPrice) : 0,
+            available_for_sale: true,
+            safety_stock: 0,
+          }];
+        }
+
+        postPayload = {
+          id: matched.id,
+          product_code: matched.product_code || String(Date.now()).slice(-6),
+          product_name: matched.product_name,
+          category: matched.category || 'No category',
+          sub_category: matched.sub_category || '',
+          barcode: matched.barcode || cleanBarcode,
+          measurement: matched.measurement || '',
+          stock_control: matched.stock_control ?? true,
+          product_price_change: Boolean(matched.price_change ?? matched.product_price_change ?? false),
+          qty_change_option: Boolean(matched.quantity_change ?? matched.qty_change_option ?? false),
+          expire_mode: Boolean(matched.stock_expire_mode ?? matched.expire_mode ?? false),
+          is_composite: Boolean(matched.is_composite ?? false),
+          use_production: Boolean(matched.use_production ?? false),
+          is_combo: Boolean(matched.is_combo ?? false),
+          is_ingredient: Boolean(matched.is_ingredient ?? false),
+          is_vat_product: Boolean(matched.is_vat_product ?? false),
+          is_variant: Boolean(matched.is_variant ?? false),
+          cost: perPieceCost,
+          shops,
+        };
+      } else if (cleanName) {
+        // Register new item into SalesPlay
+        const generatedCode = cleanCode || cleanBarcode || String(Date.now()).slice(-6);
+        postPayload = {
+          product_code: generatedCode,
+          product_name: item.name!.trim(),
+          category: item.category || 'No category',
+          barcode: cleanBarcode,
+          measurement: 'pcs',
+          stock_control: true,
+          product_price_change: false,
+          qty_change_option: false,
+          expire_mode: false,
+          is_composite: false,
+          use_production: false,
+          is_combo: false,
+          is_ingredient: false,
+          is_vat_product: false,
+          is_variant: false,
+          cost: perPieceCost,
+          shops: [{
+            shop_id: targetShop,
+            price: item.salesPrice !== undefined && Number(item.salesPrice) > 0 ? toStrictDecimal3(item.salesPrice) : 0,
+            available_for_sale: true,
+          }],
+        };
+      }
+
+      if (postPayload) {
+        try {
+          const res = await safeFetchSalesPlayJson<any>('/products', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${authToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(postPayload),
+          });
+
+          const isSuccess = Array.isArray(res) 
+            ? res.some(r => r.code === 'SUCCESS')
+            : res && (res.code === 'SUCCESS' || res.success === true);
+
+          if (isSuccess) {
+            updatedCount++;
+            if (matched) {
+              matched.cost = perPieceCost;
+            }
+          }
+        } catch (itemErr) {
+          console.warn('Notice updating product cost in SalesPlay:', itemErr);
+        }
+      }
+    }
+
+    // Refresh local storage cache if any products had their costs updated
+    if (updatedCount > 0 && typeof window !== 'undefined') {
+      try {
+        const cachedRaw = localStorage.getItem('salesplay_cached_products');
+        if (cachedRaw) {
+          const parsed = JSON.parse(cachedRaw);
+          if (Array.isArray(parsed)) {
+            for (const item of validItems) {
+              const perPieceCost = toStrictDecimal3(item.unitCost);
+              const p = parsed.find((cp: any) =>
+                (item.productId && cp.id === item.productId) ||
+                (item.barcode && cp.barcode === item.barcode) ||
+                (item.productCode && cp.product_code === item.productCode) ||
+                (item.name && cp.product_name?.toLowerCase() === item.name?.toLowerCase())
+              );
+              if (p) {
+                p.cost = perPieceCost;
+                if (item.salesPrice && Number(item.salesPrice) > 0) {
+                  p.price = toStrictDecimal3(item.salesPrice);
+                }
+              }
+            }
+            localStorage.setItem('salesplay_cached_products', JSON.stringify(parsed));
+          }
+        }
+      } catch {
+        // ignore storage errors
+      }
+    }
+
+    return {
+      success: updatedCount > 0,
+      message: `Updated retail cost for ${updatedCount} items in SalesPlay POS`,
+      updatedCount,
+    };
+  } catch (error: any) {
+    console.warn('SalesPlay product cost update error:', error);
+    return {
+      success: false,
+      message: error?.message || 'Error updating product cost in SalesPlay',
+      updatedCount: 0,
+    };
+  }
+}
+
+export interface BillSyncItem {
+  productId?: string;
+  productCode?: string;
+  barcode?: string;
+  name?: string;
+  quantityToAdd: number;
+  unitCost: number; // Retail cost per piece
+  salesPrice?: number;
+}
+
+/**
+ * Synchronizes a Purchase Bill to SalesPlay POS:
+ * 1. Updates per-piece retail cost in SalesPlay (POST /products).
+ * 2. Increments live inventory stock (POST /inventory).
+ */
+export async function syncBillToSalesPlay(
+  shopId: string,
+  items: BillSyncItem[],
+  token?: string
+): Promise<{
+  success: boolean;
+  stockUpdatedCount: number;
+  costUpdatedCount: number;
+  message: string;
+}> {
+  const authToken = token || DEFAULT_SALESPLAY_CONFIG.apiToken;
+  const targetShop = shopId || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+  // 1. Update retail product costs in SalesPlay (per-piece retail cost)
+  const costResult = await updateSalesPlayProductCosts(
+    items.map(i => ({
+      productId: i.productId,
+      productCode: i.productCode,
+      barcode: i.barcode,
+      name: i.name,
+      unitCost: i.unitCost,
+      salesPrice: i.salesPrice,
+      shopId: targetShop,
+    })),
+    authToken,
+    targetShop
+  );
+
+  // 2. Resolve product IDs for inventory stock update
+  let resolvedInventoryItems: { productId: string; quantityToAdd: number }[] = [];
+  try {
+    const prodData = await safeFetchSalesPlayJson<{ products?: any[] }>('/products', {
+      headers: { 'Authorization': `Bearer ${authToken}` },
+    });
+    const catalog = prodData?.products || [];
+
+    for (const item of items) {
+      let pId = item.productId;
+      if (!pId || pId.length < 5 || pId.startsWith('item_') || pId.startsWith('sp_')) {
+        const found = catalog.find((p: any) =>
+          (item.barcode && p.barcode && p.barcode.trim() === item.barcode.trim()) ||
+          (item.productCode && p.product_code && p.product_code.trim() === item.productCode.trim()) ||
+          (item.name && p.product_name && p.product_name.trim().toLowerCase() === item.name.trim().toLowerCase())
+        );
+        if (found?.id) {
+          pId = found.id;
+        }
+      }
+
+      if (pId && pId.length > 5 && !pId.startsWith('item_') && !pId.startsWith('sp_')) {
+        resolvedInventoryItems.push({
+          productId: pId,
+          quantityToAdd: Number(item.quantityToAdd) || 0,
+        });
+      }
+    }
+  } catch {
+    resolvedInventoryItems = items
+      .filter(i => i.productId && i.productId.length > 10 && !i.productId.startsWith('item_'))
+      .map(i => ({ productId: i.productId!, quantityToAdd: Number(i.quantityToAdd) || 0 }));
+  }
+
+  // 3. Update stock levels in SalesPlay
+  let stockUpdatedCount = 0;
+  let stockSuccess = false;
+  if (resolvedInventoryItems.length > 0) {
+    const invResult = await updateSalesPlayInventory(targetShop, resolvedInventoryItems, authToken);
+    stockUpdatedCount = invResult.updatedCount;
+    stockSuccess = invResult.success;
+  }
+
+  const overallSuccess = costResult.success || stockSuccess;
+  return {
+    success: overallSuccess,
+    stockUpdatedCount,
+    costUpdatedCount: costResult.updatedCount,
+    message: `SalesPlay POS: Stock (+${stockUpdatedCount} items) & Cost (${costResult.updatedCount} items) updated`,
+  };
+}
+
 export interface SalesPlayReceiptItem {
   product_id?: string;
   product_code?: string;
@@ -659,7 +940,65 @@ export async function fetchSalesPlayReceipts(
     }
   }
 
-  const receiptsList = Array.from(allReceiptsMap.values());
+  let receiptsList = Array.from(allReceiptsMap.values());
+
+  // Firestore Cloud Fallback: If network receipts returned empty (e.g. running on static webapp or CORS blocked),
+  // load receipts from the shared Firestore 'sales' collection where the daemon or previous syncs saved them!
+  if (receiptsList.length === 0) {
+    try {
+      const salesSnap = await getDocs(collection(db, 'sales'));
+      const startMs = start.getTime();
+      const endMs = end.getTime();
+      const cachedList: SalesPlayReceipt[] = [];
+
+      salesSnap.forEach(d => {
+        const inv = d.data() as SaleInvoice;
+        if (inv.source === 'salesplay_pos' || inv.receiptNumber) {
+          const invDateStr = inv.receiptDate || (inv.date ? inv.date.substring(0, 10) : '');
+          const startDateStr = format(start, 'yyyy-MM-dd');
+          const endDateStr = format(end, 'yyyy-MM-dd');
+          // Include if within calendar date range
+          if (invDateStr && invDateStr >= startDateStr && invDateStr <= endDateStr) {
+            cachedList.push({
+              receipt_number: inv.receiptNumber || inv.invoiceNumber,
+              receipt_type: 'SALE',
+              receipt_date: invDateStr,
+              receipt_time: inv.receiptTime || (inv.date ? inv.date.substring(11, 19) : '12:00:00'),
+              receipt_date_time: inv.date ? inv.date.replace('T', ' ').substring(0, 19) : `${invDateStr} 12:00:00`,
+              total_money: inv.totalAmount,
+              shop_id: DEFAULT_SALESPLAY_CONFIG.defaultShopId,
+              note: inv.notes,
+              cashier_name: 'Admin',
+              payments: [
+                ...(inv.cashAmount ? [{ payment_type: 'Cash', money_amount: inv.cashAmount, paid_at: inv.date }] : []),
+                ...(inv.cardAmount ? [{ payment_type: 'Card', money_amount: inv.cardAmount, paid_at: inv.date }] : []),
+                ...(inv.onlineAmount ? [{ payment_type: 'Online', money_amount: inv.onlineAmount, paid_at: inv.date }] : []),
+              ],
+              line_products: (inv.items || []).map(i => ({
+                product_id: i.productId,
+                product_code: i.productCode,
+                product_name: i.name,
+                category_name: i.category,
+                quantity: i.quantity,
+                price: i.unitPrice,
+                cost: i.unitCost,
+                cost_total: i.totalCost,
+                total_money: i.totalPrice,
+              })),
+            });
+          }
+        }
+      });
+
+      if (cachedList.length > 0) {
+        receiptsList = cachedList;
+        lastError = undefined;
+      }
+    } catch (fsErr) {
+      console.warn('Notice reading cached receipts from Firestore:', fsErr);
+    }
+  }
+
   receiptsList.sort((a, b) => {
     const timeA = a.receipt_date_time ? new Date(a.receipt_date_time.replace(' ', 'T')).getTime() : 0;
     const timeB = b.receipt_date_time ? new Date(b.receipt_date_time.replace(' ', 'T')).getTime() : 0;
@@ -772,15 +1111,18 @@ export function convertReceiptToSaleInvoice(
   const grossProfit = totalAmount - totalCost;
   const grossProfitMargin = totalAmount > 0 ? (grossProfit / totalAmount) * 100 : 0;
 
-  let dateIso = new Date().toISOString();
-  try {
-    if (receipt.receipt_date_time) {
-      dateIso = new Date(receipt.receipt_date_time.replace(' ', 'T')).toISOString();
-    } else if (receipt.receipt_date) {
-      dateIso = new Date(receipt.receipt_date).toISOString();
-    }
-  } catch {
-    dateIso = new Date().toISOString();
+  const receiptDate = receipt.receipt_date || (receipt.receipt_date_time ? receipt.receipt_date_time.substring(0, 10) : format(new Date(), 'yyyy-MM-dd'));
+  const receiptTime = receipt.receipt_time || (receipt.receipt_date_time ? receipt.receipt_date_time.substring(11, 19) : '');
+
+  // Deterministic ISO date string preserving the exact shop calendar date
+  let dateIso = `${receiptDate}T12:00:00.000Z`;
+  if (receipt.receipt_date_time) {
+    const timeSegment = receipt.receipt_date_time.length >= 19 
+      ? receipt.receipt_date_time.substring(11, 19) 
+      : '12:00:00';
+    dateIso = `${receiptDate}T${timeSegment}.000Z`;
+  } else if (receipt.receipt_date) {
+    dateIso = `${receiptDate}T12:00:00.000Z`;
   }
 
   return {
@@ -789,6 +1131,8 @@ export function convertReceiptToSaleInvoice(
     branchId,
     invoiceNumber: receipt.receipt_number || `INV-${Date.now()}`,
     receiptNumber: receipt.receipt_number,
+    receiptDate,
+    receiptTime,
     customerName,
     customerPhone,
     items,
@@ -840,6 +1184,7 @@ export async function syncSalesPlaySalesToFirestore({
   cashTotal: number;
   cardTotal: number;
   onlineTotal: number;
+  invoices: SaleInvoice[];
   message: string;
 }> {
   const settings = await getSalesPlaySettings(businessId);
@@ -849,6 +1194,53 @@ export async function syncSalesPlaySalesToFirestore({
   const { receipts, error } = await fetchSalesPlayReceipts(token, startDate, endDate);
 
   if (receipts.length === 0) {
+    try {
+      const salesSnap = await getDocs(collection(db, 'sales'));
+      const startDateStr = format(startDate || subDays(new Date(), 1), 'yyyy-MM-dd');
+      const endDateStr = format(endDate || new Date(), 'yyyy-MM-dd');
+      let fsSales = 0;
+      let fsCogs = 0;
+      let fsCash = 0;
+      let fsCard = 0;
+      let fsOnline = 0;
+      let count = 0;
+      const fallbackInvoices: SaleInvoice[] = [];
+
+      salesSnap.forEach(d => {
+        const inv = d.data() as SaleInvoice;
+        if (inv.businessId === businessId || !inv.businessId || inv.source === 'salesplay_pos') {
+          const invDateStr = inv.receiptDate || (inv.date ? inv.date.substring(0, 10) : '');
+          if (invDateStr && invDateStr >= startDateStr && invDateStr <= endDateStr) {
+            count++;
+            fallbackInvoices.push({ id: d.id, ...inv });
+            fsSales += Number(inv.totalAmount) || 0;
+            fsCogs += Number(inv.totalCost) || 0;
+            fsCash += Number(inv.cashAmount) || 0;
+            fsCard += Number(inv.cardAmount) || 0;
+            fsOnline += Number(inv.onlineAmount) || 0;
+          }
+        }
+      });
+
+      if (count > 0) {
+        const grossProfit = fsSales - fsCogs;
+        return {
+          success: true,
+          importedCount: count,
+          totalSales: toStrictDecimal3(fsSales),
+          totalCogs: toStrictDecimal3(fsCogs),
+          grossProfit: toStrictDecimal3(grossProfit),
+          cashTotal: toStrictDecimal3(fsCash),
+          cardTotal: toStrictDecimal3(fsCard),
+          onlineTotal: toStrictDecimal3(fsOnline),
+          invoices: fallbackInvoices,
+          message: `Successfully loaded ${count} sales receipts from SalesPlay POS (Cloud Synced)!`,
+        };
+      }
+    } catch (fsErr) {
+      console.warn('Notice querying Firestore sales in sync fallback:', fsErr);
+    }
+
     return {
       success: false,
       importedCount: 0,
@@ -858,6 +1250,7 @@ export async function syncSalesPlaySalesToFirestore({
       cashTotal: 0,
       cardTotal: 0,
       onlineTotal: 0,
+      invoices: [],
       message: error || 'No receipts returned from SalesPlay for this date range.',
     };
   }
@@ -868,6 +1261,7 @@ export async function syncSalesPlaySalesToFirestore({
   let cardTotal = 0;
   let onlineTotal = 0;
   let importedCount = 0;
+  const syncedInvoices: SaleInvoice[] = [];
 
   // Build product cost map for accurate COGS calculation
   const productCostMap = new Map<string, number>();
@@ -894,6 +1288,7 @@ export async function syncSalesPlaySalesToFirestore({
     receiptsToProcess = receipts;
   }
 
+  let clientQuotaExhausted = false;
   for (const receipt of receiptsToProcess) {
     const invoice = convertReceiptToSaleInvoice(
       receipt,
@@ -915,14 +1310,27 @@ export async function syncSalesPlaySalesToFirestore({
       syncedAt: serverTimestamp(),
     };
 
-    // Upsert to sales collection
-    await setDoc(docRef, payload, { merge: true });
+    syncedInvoices.push({ id: safeDocId, ...invoice });
 
-    // Also mirror to pos_transactions collection safely
-    try {
-      await setDoc(posDocRef, payload, { merge: true });
-    } catch (_) {
-      // ignore if rules only permit sales
+    if (!clientQuotaExhausted) {
+      try {
+        // Upsert to sales collection
+        await setDoc(docRef, payload, { merge: true });
+
+        // Also mirror to pos_transactions collection safely
+        try {
+          await setDoc(posDocRef, payload, { merge: true });
+        } catch (_) {
+          // ignore if rules only permit sales
+        }
+      } catch (writeErr: any) {
+        if (writeErr?.code === 'resource-exhausted' || String(writeErr?.message || '').includes('Quota limit exceeded')) {
+          console.warn('Firestore daily write quota reached (Free tier). Calculating sales and COGS in memory.');
+          clientQuotaExhausted = true;
+        } else {
+          console.warn('Notice saving sales invoice:', writeErr);
+        }
+      }
     }
 
     importedCount++;
@@ -944,6 +1352,7 @@ export async function syncSalesPlaySalesToFirestore({
     cashTotal: toStrictDecimal3(cashTotal),
     cardTotal: toStrictDecimal3(cardTotal),
     onlineTotal: toStrictDecimal3(onlineTotal),
+    invoices: syncedInvoices,
     message: `Successfully synchronized ${importedCount} sales receipts from SalesPlay POS!`,
   };
 }

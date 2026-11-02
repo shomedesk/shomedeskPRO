@@ -98,36 +98,90 @@ export default function ReportForm() {
   });
   const [editSaving, setEditSaving] = useState(false);
   const [isImportingSalesPlay, setIsImportingSalesPlay] = useState(false);
+  const [reportDate, setReportDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
 
-  // Quick 1-click import of Today's Sales directly from SalesPlay POS into Daily Report
-  // Automatically maps to CASH SALE, ONLINE SALE, and CARD SALE
-  const handleImportSalesPlayTodaySales = async () => {
+  // Existing report check for the chosen report date
+  const existingReportForDate = useMemo(() => {
+    return reports.find(r => r.date && r.date.substring(0, 10) === reportDate);
+  }, [reports, reportDate]);
+
+  // Adjust opening cash and bank balances when reportDate changes
+  const handleDateChange = (newDate: string) => {
+    setReportDate(newDate);
+    if ((selectedBranch || selectedService) && reports.length > 0) {
+      // Find the report immediately preceding newDate
+      const prevReport = reports.find(r => r.date && r.date.substring(0, 10) < newDate);
+      if (prevReport) {
+        setFormData(prev => ({
+          ...prev,
+          openingCash: prevReport.closingCash,
+          openingBank: prevReport.closingBank,
+        }));
+      }
+    }
+  };
+
+  // 1-click import of Sales from SalesPlay POS into Daily Report
+  // Maps to CASH SALE, ONLINE SALE, CARD SALE, and COGS
+  const handleImportSalesPlaySales = async (targetDateStr: string, label: string) => {
     if (!selectedBusiness) {
       toast.error('Please select a business first');
       return;
     }
+    setReportDate(targetDateStr);
     setIsImportingSalesPlay(true);
-    const toastId = toast.loading('Connecting to SalesPlay POS and importing today\'s sales...');
+    const toastId = toast.loading(`Connecting to SalesPlay POS and importing ${label}'s sales (${targetDateStr})...`);
     try {
-      const today = new Date();
-      // First try strict today
+      const parsed = parseISO(targetDateStr);
       let res = await syncSalesPlaySalesToFirestore({
         businessId: selectedBusiness.id,
         ownerId: selectedBusiness.ownerId || auth.currentUser?.uid || '',
         branchId: selectedBranch?.id || 'main',
-        startDate: startOfDay(today),
-        endDate: endOfDay(today),
+        startDate: startOfDay(parsed),
+        endDate: endOfDay(parsed),
       });
 
-      // If strict today returned 0 receipts, check last 24 hours to cover timezone boundaries
+      // Triple-Safety Fallback: Direct Firestore sales query
       if (!res.success || res.importedCount === 0) {
-        res = await syncSalesPlaySalesToFirestore({
-          businessId: selectedBusiness.id,
-          ownerId: selectedBusiness.ownerId || auth.currentUser?.uid || '',
-          branchId: selectedBranch?.id || 'main',
-          startDate: subDays(today, 1),
-          endDate: endOfDay(today),
-        });
+        try {
+          const salesSnap = await getDocs(collection(db, 'sales'));
+          let fsSales = 0;
+          let fsCogs = 0;
+          let fsCash = 0;
+          let fsCard = 0;
+          let fsOnline = 0;
+          let count = 0;
+
+          salesSnap.forEach(d => {
+            const inv = d.data() as any;
+            const dateStr = inv.receiptDate || (inv.date ? inv.date.substring(0, 10) : '');
+            if (dateStr === targetDateStr && (inv.source === 'salesplay_pos' || inv.receiptNumber)) {
+              count++;
+              fsSales += Number(inv.totalAmount) || 0;
+              fsCogs += Number(inv.totalCost) || 0;
+              fsCash += Number(inv.cashAmount) || 0;
+              fsCard += Number(inv.cardAmount) || 0;
+              fsOnline += Number(inv.onlineAmount) || 0;
+            }
+          });
+
+          if (count > 0) {
+            res = {
+              success: true,
+              importedCount: count,
+              totalSales: toStrictDecimal3(fsSales),
+              totalCogs: toStrictDecimal3(fsCogs),
+              grossProfit: toStrictDecimal3(fsSales - fsCogs),
+              cashTotal: toStrictDecimal3(fsCash),
+              cardTotal: toStrictDecimal3(fsCard),
+              onlineTotal: toStrictDecimal3(fsOnline),
+              invoices: [],
+              message: `Found ${count} sales receipts in Firestore cloud database for ${targetDateStr}.`,
+            };
+          }
+        } catch (e) {
+          console.warn('Direct Firestore fallback notice in ReportForm:', e);
+        }
       }
 
       if (res.success && res.importedCount > 0) {
@@ -140,18 +194,22 @@ export default function ReportForm() {
           cogs: res.totalCogs,
         }));
         toast.success(
-          `Imported ${res.importedCount} receipts from SalesPlay POS! Total: ${currency} ${formatAmount(res.totalSales, currency)} | COGS: ${currency} ${formatAmount(res.totalCogs, currency)} | Gross Profit: ${currency} ${formatAmount(res.grossProfit, currency)}`,
+          `Imported ${res.importedCount} receipts for ${label} (${targetDateStr})! Total: ${currency} ${formatAmount(res.totalSales, currency)} | COGS: ${currency} ${formatAmount(res.totalCogs, currency)} | Gross Profit: ${currency} ${formatAmount(res.grossProfit, currency)}`,
           { id: toastId, duration: 6000 }
         );
       } else {
-        toast.info(res.message || 'No sales found in SalesPlay for today.', { id: toastId });
+        toast.info(res.message || `No sales found in SalesPlay for ${label} (${targetDateStr}).`, { id: toastId });
       }
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to import sales from SalesPlay POS', { id: toastId });
+      toast.error(err?.message || `Failed to import sales for ${label}`, { id: toastId });
     } finally {
       setIsImportingSalesPlay(false);
     }
   };
+
+  const handleImportToday = () => handleImportSalesPlaySales(format(new Date(), 'yyyy-MM-dd'), 'Today');
+  const handleImportYesterday = () => handleImportSalesPlaySales(format(subDays(new Date(), 1), 'yyyy-MM-dd'), 'Yesterday');
+  const handleImportSelectedDate = () => handleImportSalesPlaySales(reportDate, format(parseISO(reportDate), 'MMM dd, yyyy'));
 
   // Filter & Pagination State
   const [dateFilter, setDateFilter] = useState('');
@@ -309,24 +367,26 @@ export default function ReportForm() {
     return () => unsub();
   }, [selectedBusiness, selectedBranch, selectedService]);
 
-  // Listen for today's purchase bills to enable quick expense breakdown import
+  // Listen for purchase bills matching the active reportDate to enable quick expense breakdown import
   useEffect(() => {
     if (!selectedBusiness) return;
-    const todayStr = format(new Date(), 'yyyy-MM-dd');
     const q = query(
       collection(db, 'purchaseLogs'),
-      where('businessId', '==', selectedBusiness.id),
-      ...(selectedBranch ? [where('branchId', '==', selectedBranch.id)] : [])
+      where('businessId', '==', selectedBusiness.id)
     );
     const unsub = onSnapshot(q, (snapshot) => {
       const logs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as PurchaseLog));
-      const todays = logs.filter(l => l.date && l.date.startsWith(todayStr));
-      setTodayPurchaseBills(todays);
+      const targetBills = logs.filter(l => {
+        const matchesBranch = !selectedBranch || !l.branchId || l.branchId === 'global' || l.branchId === 'main' || l.branchId === selectedBranch.id;
+        const matchesDate = l.date && l.date.startsWith(reportDate);
+        return matchesBranch && matchesDate;
+      });
+      setTodayPurchaseBills(targetBills);
     }, (err) => {
-      console.warn('Failed to load today purchase logs:', err);
+      console.warn('Failed to load purchase logs for report date:', err);
     });
     return () => unsub();
-  }, [selectedBusiness, selectedBranch]);
+  }, [selectedBusiness, selectedBranch, reportDate]);
 
   // Auto-fetch all Pending Purchase Bills (where netDue > 0)
   useEffect(() => {
@@ -496,6 +556,20 @@ export default function ReportForm() {
     return bankToBankRows.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
   }, [bankToBankRows]);
 
+  // 1. Direct Supplier Cash Bills paid today (from Suppliers page purchase logs)
+  const todaySupplierDirectCashPaid = useMemo(() => {
+    return todayPurchaseBills
+      .filter(b => b.paymentMode === 'cash' && Number(b.paidAmount) > 0)
+      .reduce((sum, b) => sum + (Number(b.paidAmount) || 0), 0);
+  }, [todayPurchaseBills]);
+
+  // 2. Direct Supplier Bank/Card Bills paid today (from Suppliers page purchase logs)
+  const todaySupplierDirectBankPaid = useMemo(() => {
+    return todayPurchaseBills
+      .filter(b => (b.paymentMode === 'bank' || b.paymentMode === 'card' || b.paymentMode === 'online') && Number(b.paidAmount) > 0)
+      .reduce((sum, b) => sum + (Number(b.paidAmount) || 0), 0);
+  }, [todayPurchaseBills]);
+
   // Liquidity Calculations with Accounts Payable (no double counting in Operating Expenses)
   const totalPendingBillsPaidCash = billPayments
     .filter(p => p.paymentMode === 'cash')
@@ -504,6 +578,10 @@ export default function ReportForm() {
   const totalPendingBillsPaidBank = billPayments
     .filter(p => p.paymentMode === 'bank')
     .reduce((sum, p) => sum + (Number(p.paymentAmount) || 0), 0);
+
+  // Total Supplier Bills Paid Cash = Direct Cash Bills from Suppliers page + Pending Bills Paid Cash inside Daily Report
+  const totalSupplierCashPaid = toStrictDecimal3(todaySupplierDirectCashPaid + totalPendingBillsPaidCash);
+  const totalSupplierBankPaid = toStrictDecimal3(todaySupplierDirectBankPaid + totalPendingBillsPaidBank);
 
   // 3-Box Sales Revenue Calculations (Cash, Online, Card)
   const cashSale = Number(formData.cashSale) || 0;
@@ -524,7 +602,7 @@ export default function ReportForm() {
     totalBankToCash - 
     (Number(formData.cashExpense) || 0) - 
     totalCashToBank - 
-    totalPendingBillsPaidCash
+    totalSupplierCashPaid
   );
 
   // Closing Bank: Opening bank + electronic/card/online sales + cash to bank - bank expenses - bank to cash - supplier bank bills
@@ -534,7 +612,7 @@ export default function ReportForm() {
     totalCashToBank - 
     (Number(formData.bankExpense) || 0) - 
     totalBankToCash - 
-    totalPendingBillsPaidBank
+    totalSupplierBankPaid
   );
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -561,13 +639,19 @@ export default function ReportForm() {
       const effectiveOnlineBankId = onlineBankId || selectedBankId || branchBankAccounts[0]?.id || bankAccounts[0]?.id || '';
       const effectiveCardBankId = cardBankId || selectedBankId || branchBankAccounts[0]?.id || bankAccounts[0]?.id || '';
 
+      // Deterministic report date: if selected date is today, use current ISO time; otherwise assign to the selected date
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      const reportIsoDate = reportDate === todayStr 
+        ? new Date().toISOString() 
+        : `${reportDate}T23:59:00.000Z`;
+
       const report: DailyReport = {
         businessId: selectedBusiness.id,
         ownerId: selectedBusiness.ownerId,
         branchId: selectedBranch?.id || 'global',
         serviceId: selectedService?.id || 'global',
         managerId: auth.currentUser.uid,
-        date: new Date().toISOString(),
+        date: reportIsoDate,
         openingCash: Number(formData.openingCash) || 0,
         openingBank: Number(formData.openingBank) || 0,
         cashSale: toStrictDecimal3(cashSale),
@@ -616,7 +700,7 @@ export default function ReportForm() {
               bankId: exp.bankId || '',
               bankName: exp.bankName || '',
               note: exp.note || '',
-              date: new Date().toISOString(),
+              date: reportIsoDate,
               createdAt: serverTimestamp(),
             }))
           );
@@ -633,7 +717,7 @@ export default function ReportForm() {
             paidAmount: increment(p.paymentAmount),
             netDue: increment(-p.paymentAmount),
             lastPaymentReportId: reportRef.id,
-            lastPaymentDate: new Date().toISOString(),
+            lastPaymentDate: reportIsoDate,
           });
         } catch (bErr) {
           console.warn('Failed to update purchase bill settlement:', bErr);
@@ -648,7 +732,7 @@ export default function ReportForm() {
         serviceId: selectedService?.id || 'global',
         userId: auth.currentUser.uid,
         reportId: reportRef.id,
-        date: new Date().toISOString(),
+        date: reportIsoDate,
         createdAt: serverTimestamp(),
         isFromReport: true,
       };
@@ -1354,6 +1438,78 @@ export default function ReportForm() {
                 </div>
               </div>
 
+              {/* 0. Report Date Selection & Midnight Crossing Helper */}
+              <div className="bg-slate-900/90 p-4 rounded-2xl border border-blue-500/30 space-y-3 shadow-lg">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="p-2 bg-blue-500/10 text-blue-400 rounded-xl">
+                      <Calendar size={18} />
+                    </div>
+                    <div>
+                      <label className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-2">
+                        Report Date / রিপোর্টের তারিখ
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300">
+                          {reportDate === format(new Date(), 'yyyy-MM-dd') ? 'Today (আজ)' : reportDate === format(subDays(new Date(), 1), 'yyyy-MM-dd') ? 'Yesterday (গতকাল)' : 'Custom Date'}
+                        </span>
+                      </label>
+                      <p className="text-[10px] text-slate-400 font-medium">
+                        রাত ১২টার পর রিপোর্ট সাবমিট করলে &apos;Yesterday&apos; বেছে নিন যাতে সঠিক দিনে হিসাব সেভ হয়
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Quick Today & Yesterday Preset Buttons */}
+                  <div className="flex items-center gap-1.5 self-start sm:self-auto">
+                    <button
+                      type="button"
+                      onClick={() => handleDateChange(format(new Date(), 'yyyy-MM-dd'))}
+                      className={cn(
+                        "px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer",
+                        reportDate === format(new Date(), 'yyyy-MM-dd')
+                          ? "bg-blue-600 text-white shadow-md shadow-blue-900/30 font-black"
+                          : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                      )}
+                    >
+                      📅 Today
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDateChange(format(subDays(new Date(), 1), 'yyyy-MM-dd'))}
+                      className={cn(
+                        "px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer",
+                        reportDate === format(subDays(new Date(), 1), 'yyyy-MM-dd')
+                          ? "bg-amber-600 text-white shadow-md shadow-amber-900/30 font-black"
+                          : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                      )}
+                    >
+                      ⏳ Yesterday
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-center gap-3">
+                  <input
+                    type="date"
+                    value={reportDate}
+                    max={format(new Date(), 'yyyy-MM-dd')}
+                    onChange={(e) => handleDateChange(e.target.value)}
+                    className="w-full sm:w-auto flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm font-bold text-white outline-none focus:border-blue-500 font-mono"
+                  />
+                  <div className="text-xs text-slate-300 font-bold bg-slate-800/80 px-3.5 py-2.5 rounded-xl border border-slate-700/50 w-full sm:w-auto text-center sm:text-left">
+                    Active Report Date: <span className="text-emerald-400 font-mono font-black">{format(parseISO(reportDate), 'EEEE, dd MMMM yyyy')}</span>
+                  </div>
+                </div>
+
+                {existingReportForDate && (
+                  <div className="flex items-center gap-2 p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-300 text-xs font-medium">
+                    <ShieldAlert size={16} className="text-amber-400 shrink-0" />
+                    <span>
+                      Notice: A report for this date was already submitted ({currency} {formatAmount(existingReportForDate.closingCash, currency)} closing cash). You can edit it from the list or submit an update.
+                    </span>
+                  </div>
+                )}
+              </div>
+
               <div className="grid grid-cols-2 gap-4">
                 <InputGroup label="Opening Cash" value={formData.openingCash} readOnly icon={<Wallet size={16} />} />
                 <InputGroup label="Opening Bank" value={formData.openingBank} readOnly icon={<Landmark size={16} />} />
@@ -1375,20 +1531,57 @@ export default function ReportForm() {
               )}
 
               <div className="space-y-2">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
                     <Receipt size={14} className="text-emerald-400" /> Sales Revenue
                   </span>
-                  <button
-                    type="button"
-                    onClick={handleImportSalesPlayTodaySales}
-                    disabled={isImportingSalesPlay}
-                    className="flex items-center gap-1.5 px-3 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-xl text-[11px] font-bold transition-all cursor-pointer disabled:opacity-50 active:scale-95"
-                    title="Import today's live sales from SalesPlay POS"
-                  >
-                    <RefreshCw size={12} className={cn(isImportingSalesPlay && "animate-spin")} />
-                    <span>{isImportingSalesPlay ? 'Importing...' : '⚡ Import Today from SalesPlay'}</span>
-                  </button>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleImportToday}
+                      disabled={isImportingSalesPlay}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-50 active:scale-95 border",
+                        reportDate === format(new Date(), 'yyyy-MM-dd')
+                          ? "bg-emerald-600 text-white border-emerald-500 shadow-md shadow-emerald-900/30"
+                          : "bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                      )}
+                      title="Import Today's sales from SalesPlay POS and set date to Today"
+                    >
+                      <RefreshCw size={13} className={cn(isImportingSalesPlay && "animate-spin")} />
+                      <span>⚡ Import Today Sales</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleImportYesterday}
+                      disabled={isImportingSalesPlay}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-50 active:scale-95 border",
+                        reportDate === format(subDays(new Date(), 1), 'yyyy-MM-dd')
+                          ? "bg-amber-600 text-white border-amber-500 shadow-md shadow-amber-900/30"
+                          : "bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border-amber-500/30"
+                      )}
+                      title="Import Yesterday's sales from SalesPlay POS and set date to Yesterday"
+                    >
+                      <History size={13} className={cn(isImportingSalesPlay && "animate-spin")} />
+                      <span>⏳ Import Yesterday Sales</span>
+                    </button>
+
+                    {reportDate !== format(new Date(), 'yyyy-MM-dd') && reportDate !== format(subDays(new Date(), 1), 'yyyy-MM-dd') && (
+                      <button
+                        type="button"
+                        onClick={handleImportSelectedDate}
+                        disabled={isImportingSalesPlay}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-50 active:scale-95"
+                        title={`Import sales for ${reportDate}`}
+                      >
+                        <Calendar size={13} />
+                        <span>Import for {format(parseISO(reportDate), 'MMM dd')}</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {/* 3 Distinct Sales Input Channels (Cash, Online, Card) */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -2079,10 +2272,26 @@ export default function ReportForm() {
                   </div>
                   <span className="text-lg font-black font-mono text-emerald-400">{currency} {formatAmount(closingCash, currency)}</span>
                 </div>
+                {todaySupplierDirectCashPaid > 0 && (
+                  <div className="flex justify-between items-center text-xs text-amber-400 font-mono px-3 py-1.5 bg-amber-500/10 rounded-xl border border-amber-500/20">
+                    <span className="font-bold flex items-center gap-1.5 text-[11px]">
+                      <span>🧾</span> Today's Supplier Cash Bills Paid:
+                    </span>
+                    <span className="font-black">-{currency} {formatAmount(todaySupplierDirectCashPaid, currency)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Closing Bank</span>
                   <span className="text-lg font-black font-mono text-blue-400">{currency} {formatAmount(closingBank, currency)}</span>
                 </div>
+                {todaySupplierDirectBankPaid > 0 && (
+                  <div className="flex justify-between items-center text-xs text-indigo-400 font-mono px-3 py-1.5 bg-indigo-500/10 rounded-xl border border-indigo-500/20">
+                    <span className="font-bold flex items-center gap-1.5 text-[11px]">
+                      <span>🏦</span> Today's Supplier Bank Bills Paid:
+                    </span>
+                    <span className="font-black">-{currency} {formatAmount(todaySupplierDirectBankPaid, currency)}</span>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-2">

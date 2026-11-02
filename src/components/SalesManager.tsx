@@ -88,7 +88,16 @@ export default function SalesManager() {
   const [viewingInvoice, setViewingInvoice] = useState<SaleInvoice | null>(null);
   const [isSyncingSales, setIsSyncingSales] = useState(false);
 
-  // Direct Live Sync from SalesPlay POS
+  // Date extraction helper ensuring timezone-immune calendar comparison
+  const getInvoiceDateStr = (inv: SaleInvoice): string => {
+    if (inv.receiptDate) return inv.receiptDate;
+    if (inv.date) {
+      return inv.date.substring(0, 10);
+    }
+    return '';
+  };
+
+  // Direct Live Sync from SalesPlay POS for the selected date range
   const handleSyncSalesPlaySales = async () => {
     const biz = selectedBusiness || (businesses.length > 0 ? businesses[0] : null);
     if (!biz) {
@@ -97,7 +106,8 @@ export default function SalesManager() {
     }
 
     setIsSyncingSales(true);
-    const toastId = toast.loading('Connecting to SalesPlay POS and fetching latest receipts...');
+    const modeLabel = dateFilterMode === 'today' ? "Today's" : dateFilterMode === 'yesterday' ? "Yesterday's" : dateFilterMode === 'week' ? "Last 7 Days" : dateFilterMode === 'month' ? "This Month's" : "Selected Range";
+    const toastId = toast.loading(`Connecting to SalesPlay POS and fetching ${modeLabel} receipts...`);
 
     try {
       const today = new Date();
@@ -111,7 +121,8 @@ export default function SalesManager() {
         start = startOfDay(y);
         end = endOfDay(y);
       } else if (dateFilterMode === 'week') {
-        start = startOfDay(subDays(today, 7));
+        start = startOfDay(subDays(today, 6)); // Exactly 7 days: today - 6 through today
+        end = endOfDay(today);
       } else if (dateFilterMode === 'month') {
         start = startOfMonth(today);
         end = endOfMonth(today);
@@ -119,7 +130,6 @@ export default function SalesManager() {
         start = startOfDay(parseISO(customStartDate));
         end = endOfDay(parseISO(customEndDate));
       } else {
-        // Default to last 30 days
         start = subDays(today, 29);
       }
 
@@ -132,13 +142,35 @@ export default function SalesManager() {
       });
 
       if (res.success) {
+        // Merge synced invoices into in-memory invoices immediately so UI reflects them instantly
+        if (res.invoices && res.invoices.length > 0) {
+          setInvoices(prev => {
+            const map = new Map<string, SaleInvoice>();
+            res.invoices.forEach(inv => {
+              const key = inv.invoiceNumber || inv.receiptNumber || inv.id || '';
+              if (key) map.set(key, inv);
+            });
+            prev.forEach(inv => {
+              const key = inv.invoiceNumber || inv.receiptNumber || inv.id || '';
+              if (key && !map.has(key)) map.set(key, inv);
+            });
+            const merged = Array.from(map.values());
+            merged.sort((a, b) => {
+              const timeA = a.date ? new Date(a.date).getTime() : 0;
+              const timeB = b.date ? new Date(b.date).getTime() : 0;
+              return timeB - timeA;
+            });
+            return merged;
+          });
+        }
+
         // Also refresh catalog products so any new items entered in SalesPlay are immediately available
         fetchSalesPlayProductsWithInventory(undefined, undefined, true).then(prods => {
           if (prods && prods.length > 0) setCatalogProducts(prods);
         }).catch(() => {});
 
         toast.success(
-          `Synced ${res.importedCount} sales! Total: ${currency} ${formatAmount(res.totalSales, currency)} (COGS: ${currency} ${formatAmount(res.totalCogs, currency)} | Gross Profit: ${currency} ${formatAmount(res.grossProfit, currency)})`,
+          `Synced ${res.importedCount} ${modeLabel} sales! Total: ${currency} ${formatAmount(res.totalSales, currency)} (COGS: ${currency} ${formatAmount(res.totalCogs, currency)} | Gross Profit: ${currency} ${formatAmount(res.grossProfit, currency)})`,
           { id: toastId, duration: 6000 }
         );
       } else {
@@ -206,27 +238,14 @@ export default function SalesManager() {
     return () => unsub();
   }, [selectedBusiness, selectedBranch, isAllBusinessesSelected]);
 
-  // Date Filtering
+  // Exact Calendar Date Filtering (Deterministic across timezones)
   const filteredInvoices = useMemo(() => {
     const today = new Date();
-    let start: Date;
-    let end: Date = endOfDay(today);
-
-    if (dateFilterMode === 'today') {
-      start = startOfDay(today);
-    } else if (dateFilterMode === 'yesterday') {
-      const y = subDays(today, 1);
-      start = startOfDay(y);
-      end = endOfDay(y);
-    } else if (dateFilterMode === 'week') {
-      start = startOfDay(subDays(today, 7));
-    } else if (dateFilterMode === 'month') {
-      start = startOfMonth(today);
-      end = endOfMonth(today);
-    } else {
-      start = startOfDay(parseISO(customStartDate));
-      end = endOfDay(parseISO(customEndDate));
-    }
+    const todayStr = format(today, 'yyyy-MM-dd');
+    const yesterdayStr = format(subDays(today, 1), 'yyyy-MM-dd');
+    const weekStartStr = format(subDays(today, 6), 'yyyy-MM-dd');
+    const monthStartStr = format(startOfMonth(today), 'yyyy-MM-dd');
+    const monthEndStr = format(endOfMonth(today), 'yyyy-MM-dd');
 
     return invoices.filter(inv => {
       // Branch check: if branch selected, match branch or allow global/main receipts
@@ -234,13 +253,28 @@ export default function SalesManager() {
         return false;
       }
 
-      // 1. Date check
-      const invDate = inv.date ? parseISO(inv.date) : new Date();
-      const inRange = isWithinInterval(invDate, { start, end });
+      // 1. Exact Date check using calendar date
+      const dateStr = getInvoiceDateStr(inv);
+      if (!dateStr) return false;
+
+      let inRange = false;
+      if (dateFilterMode === 'today') {
+        inRange = dateStr === todayStr;
+      } else if (dateFilterMode === 'yesterday') {
+        inRange = dateStr === yesterdayStr;
+      } else if (dateFilterMode === 'week') {
+        inRange = dateStr >= weekStartStr && dateStr <= todayStr;
+      } else if (dateFilterMode === 'month') {
+        inRange = dateStr >= monthStartStr && dateStr <= monthEndStr;
+      } else if (dateFilterMode === 'custom') {
+        const startStr = customStartDate || '1970-01-01';
+        const endStr = customEndDate || '2099-12-31';
+        inRange = dateStr >= startStr && dateStr <= endStr;
+      }
       if (!inRange) return false;
 
       // 2. Payment mode check
-      if (paymentFilter !== 'all' && inv.paymentMode.toLowerCase() !== paymentFilter.toLowerCase()) {
+      if (paymentFilter !== 'all' && inv.paymentMode?.toLowerCase() !== paymentFilter.toLowerCase()) {
         return false;
       }
 
@@ -255,7 +289,7 @@ export default function SalesManager() {
 
       return true;
     });
-  }, [invoices, dateFilterMode, customStartDate, customEndDate, paymentFilter, searchTerm]);
+  }, [invoices, dateFilterMode, customStartDate, customEndDate, paymentFilter, searchTerm, selectedBranch]);
 
   // Calculate High-Standard ERP Financial Metrics (Vyapar Style)
   const metrics = useMemo(() => {
@@ -386,10 +420,10 @@ export default function SalesManager() {
             disabled={isSyncingSales}
             onClick={handleSyncSalesPlaySales}
             className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-black py-2.5 px-4 rounded-xl shadow-lg shadow-blue-900/30 transition-all cursor-pointer active:scale-95 disabled:opacity-50"
-            title="Import all sales & receipts directly from SalesPlay POS"
+            title="Import sales & receipts directly from SalesPlay POS for the active period"
           >
             <RefreshCw size={15} className={cn("text-white", isSyncingSales && "animate-spin")} />
-            <span>{isSyncingSales ? 'Importing Sales...' : '⚡ Sync SalesPlay Sales'}</span>
+            <span>{isSyncingSales ? 'Importing Sales...' : `⚡ Sync ${dateFilterMode === 'today' ? "Today's" : dateFilterMode === 'yesterday' ? "Yesterday's" : dateFilterMode === 'week' ? "Last 7 Days" : "Selected"} Sales`}</span>
           </button>
 
           <button
@@ -604,14 +638,30 @@ export default function SalesManager() {
 
       {/* Sales Invoices List */}
       <div className="bg-[#1E293B] rounded-3xl border border-slate-800 shadow-xl overflow-hidden">
-        <div className="p-5 border-b border-slate-800 flex justify-between items-center">
-          <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-            <Receipt size={16} className="text-emerald-400" />
-            Itemized Sales Invoices ({filteredInvoices.length})
-          </h2>
-          <span className="text-[11px] font-bold text-slate-500">
-            Period: {dateFilterMode.toUpperCase()}
-          </span>
+        <div className="p-5 border-b border-slate-800 flex flex-wrap justify-between items-center gap-3">
+          <div className="flex items-center gap-3">
+            <h2 className="text-xs font-black text-slate-300 uppercase tracking-widest flex items-center gap-2">
+              <Receipt size={16} className="text-emerald-400" />
+              Itemized Sales Invoices ({filteredInvoices.length})
+            </h2>
+            <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+              {dateFilterMode === 'today' ? `📅 Today (${format(new Date(), 'yyyy-MM-dd')})` :
+               dateFilterMode === 'yesterday' ? `⏳ Yesterday (${format(subDays(new Date(), 1), 'yyyy-MM-dd')})` :
+               dateFilterMode === 'week' ? `📅 Last 7 Days (${format(subDays(new Date(), 6), 'yyyy-MM-dd')} to ${format(new Date(), 'yyyy-MM-dd')})` :
+               dateFilterMode === 'month' ? `📅 This Month (${format(startOfMonth(new Date()), 'yyyy-MM-dd')} to ${format(endOfMonth(new Date()), 'yyyy-MM-dd')})` :
+               `📅 Custom (${customStartDate} to ${customEndDate})`}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleSyncSalesPlaySales}
+            disabled={isSyncingSales}
+            className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 px-3 py-1 rounded-xl transition-all cursor-pointer disabled:opacity-50"
+            title="Download latest SalesPlay receipts for this period"
+          >
+            <RefreshCw size={12} className={cn(isSyncingSales && "animate-spin")} />
+            <span>{isSyncingSales ? 'Fetching...' : '⚡ Sync SalesPlay'}</span>
+          </button>
         </div>
 
         <div className="overflow-x-auto">
@@ -703,8 +753,27 @@ export default function SalesManager() {
 
               {filteredInvoices.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="p-12 text-center text-slate-500 font-bold uppercase tracking-wider text-xs">
-                    No sales invoices found for this filter criteria
+                  <td colSpan={10} className="p-12 text-center">
+                    <div className="max-w-md mx-auto space-y-3">
+                      <div className="w-12 h-12 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto">
+                        <Receipt size={24} />
+                      </div>
+                      <p className="text-sm font-bold text-slate-300">
+                        No sales invoices loaded for {dateFilterMode === 'today' ? "Today" : dateFilterMode === 'yesterday' ? "Yesterday" : dateFilterMode === 'week' ? "the Last 7 Days" : dateFilterMode === 'month' ? "This Month" : "the Selected Date Range"}
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        SalesPlay POS থেকে এই সময়ের সব সেলস ও রিসিট দেখতে নিচের বাটনে ক্লিক করুন
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleSyncSalesPlaySales}
+                        disabled={isSyncingSales}
+                        className="inline-flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-black py-2.5 px-4 rounded-xl shadow-lg transition-all cursor-pointer active:scale-95 disabled:opacity-50"
+                      >
+                        <RefreshCw size={14} className={cn(isSyncingSales && "animate-spin")} />
+                        <span>{isSyncingSales ? 'Fetching SalesPlay Receipts...' : `⚡ Sync ${dateFilterMode === 'today' ? "Today's" : dateFilterMode === 'yesterday' ? "Yesterday's" : dateFilterMode === 'week' ? "Last 7 Days" : "Selected"} Sales`}</span>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               )}

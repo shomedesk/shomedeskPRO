@@ -19,7 +19,7 @@ import {
   Barcode as BarcodeIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { doc, updateDoc, increment, serverTimestamp } from 'firebase/firestore';
+import { doc, updateDoc, increment, serverTimestamp, collection, addDoc } from 'firebase/firestore';
 import { db, auth } from '@/src/lib/firebase';
 import { format } from 'date-fns';
 import {
@@ -38,6 +38,7 @@ import {
 } from '@/src/services/productPackService';
 import {
   updateSalesPlayInventory,
+  updateSalesPlayProductCosts,
   getSalesPlaySettings,
   DEFAULT_SALESPLAY_CONFIG,
 } from '@/src/services/salesplay';
@@ -324,19 +325,44 @@ export function EditPurchaseBillModal({
         }
       });
 
-      // 2. Perform live SalesPlay Stock Update if there are any deltas
+      // 2. Perform live SalesPlay Stock & Cost Updates
       let spSyncSuccess = false;
       let spUpdatedCount = 0;
-      if (stockUpdates.length > 0 && activeBusinessId) {
+      let spCostUpdatedCount = 0;
+      if (activeBusinessId) {
         try {
           const spSettings = await getSalesPlaySettings(activeBusinessId);
           const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[branchId])
             || spSettings.selectedShopId
             || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
 
-          const spRes = await updateSalesPlayInventory(mappedShop, stockUpdates, spSettings.apiToken);
-          spSyncSuccess = spRes.success;
-          spUpdatedCount = spRes.updatedCount;
+          // A. Stock updates
+          if (stockUpdates.length > 0) {
+            const spRes = await updateSalesPlayInventory(mappedShop, stockUpdates, spSettings.apiToken);
+            spSyncSuccess = spRes.success;
+            spUpdatedCount = spRes.updatedCount;
+          }
+
+          // B. Cost updates (per-piece retail cost in SalesPlay, e.g. 1 pack 24 pcs @ 1.000 OMR = 0.042 OMR/piece)
+          if (items.length > 0) {
+            const costUpdates = items.map(i => {
+              const perPieceCost = i.orderMode === 'pack' && i.piecesPerPack && i.packPrice
+                ? Math.round(((Number(i.packPrice) || 0) / Math.max(1, Number(i.piecesPerPack))) * 1000) / 1000
+                : (Number(i.unitPrice) || 0);
+              return {
+                productId: resolveSalesPlayId(i) || undefined,
+                productCode: i.productCode,
+                barcode: i.barcode,
+                name: i.name,
+                unitCost: perPieceCost,
+                salesPrice: Number(i.salesPrice) || 0,
+                shopId: mappedShop,
+              };
+            });
+            const costRes = await updateSalesPlayProductCosts(costUpdates, spSettings.apiToken, mappedShop);
+            spCostUpdatedCount = costRes.updatedCount;
+            if (costRes.success) spSyncSuccess = true;
+          }
         } catch (spErr) {
           console.warn('SalesPlay edit sync notice:', spErr);
         }
@@ -393,7 +419,7 @@ export function EditPurchaseBillModal({
         }
       }
 
-      // 5. Update Bank Account if paidAmount changed and was bank
+      // 5. Update Bank or Cash Account if paidAmount changed
       const paidDelta = finalPaidAmount - oldPaidAmount;
       if (paidDelta !== 0 && (paymentMode === 'bank' || paymentMode === 'card') && bankAccountId) {
         try {
@@ -402,6 +428,27 @@ export function EditPurchaseBillModal({
           });
         } catch (bankErr) {
           console.warn('Failed to adjust bank account balance:', bankErr);
+        }
+      } else if (paidDelta !== 0 && paymentMode === 'cash' && activeBusinessId) {
+        try {
+          const txPayload: Record<string, any> = {
+            businessId: activeBusinessId,
+            branchId: branchId || 'global',
+            ownerId: auth.currentUser?.uid || 'system',
+            amount: Math.abs(paidDelta),
+            type: paidDelta > 0 ? 'expense' : 'income',
+            fromAccount: paidDelta > 0 ? 'cash' : undefined,
+            toAccount: paidDelta < 0 ? 'cash' : undefined,
+            category: 'Purchase Bill Payment',
+            description: `Bill Edit #${finalInvoiceNumber} (${selectedSup?.name || 'Supplier'})`,
+            billId: log.id,
+            date: new Date().toISOString(),
+            createdAt: serverTimestamp(),
+          };
+          if (auth.currentUser?.uid) txPayload.userId = auth.currentUser.uid;
+          await addDoc(collection(db, 'transactions'), txPayload);
+        } catch (cashErr) {
+          console.warn('Failed to record cash bill adjustment:', cashErr);
         }
       }
 

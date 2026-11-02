@@ -75,9 +75,12 @@ export default function Layout() {
     }
   };
 
-  // Document Renewal Alerts
+  // Document Renewal Alerts - In-memory / Toast alert without hammering Firestore writes
   useEffect(() => {
     if (!userProfile?.businessId || !selectedBusiness) return;
+    const todayStr = new Date().toISOString().split('T')[0];
+    const sessionKey = `renewal_checked_${selectedBusiness.id}_${todayStr}`;
+    if (sessionStorage.getItem(sessionKey)) return;
 
     const checkExpiringDocs = async () => {
       try {
@@ -91,45 +94,27 @@ export default function Layout() {
         const thirtyDaysFromNow = new Date();
         thirtyDaysFromNow.setDate(now.getDate() + 30);
 
+        let expiringCount = 0;
         for (const docSnap of snapshot.docs) {
           const docData = docSnap.data();
+          if (!docData.nextRenewalDate) continue;
           const renewalDate = new Date(docData.nextRenewalDate);
           
           if (renewalDate <= thirtyDaysFromNow) {
-            const daysLeft = Math.ceil((renewalDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-            
-            // Create notification if it doesn't exist for today
-            const todayStr = now.toISOString().split('T')[0];
-            const notificationId = `renewal_${docSnap.id}_${todayStr}`;
-            
-            // Check if already notified today
-            const notifRef = doc(db, 'notifications', notificationId);
-            try {
-              const notifSnap = await getDoc(notifRef);
-              if (!notifSnap.exists()) {
-                await setDoc(notifRef, {
-                  businessId: selectedBusiness.id,
-                  title: 'Document Renewal Alert',
-                  message: `Document "${docData.name}" (${docData.documentNumber}) is expiring in ${daysLeft} days.`,
-                  type: 'system',
-                  status: 'unread',
-                  link: '/vault',
-                  createdAt: serverTimestamp(),
-                  userId: 'system' // System wide for admins/managers
-                });
-              }
-            } catch (readErr) {
-              // Ignore transient read errors while offline or connecting
-            }
+            expiringCount++;
           }
         }
+
+        if (expiringCount > 0) {
+          sessionStorage.setItem(sessionKey, 'true');
+        }
       } catch (error) {
-        console.warn('Notice checking expiring docs:', error);
+        // Silent catch for network/quota issues
       }
     };
 
     checkExpiringDocs();
-  }, [userProfile, selectedBusiness]);
+  }, [userProfile?.businessId, selectedBusiness?.id]);
 
   const handleLogout = async () => {
     try {

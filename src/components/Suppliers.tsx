@@ -80,6 +80,8 @@ import {
 } from '@/src/services/productPackService';
 import {
   updateSalesPlayInventory,
+  updateSalesPlayProductCosts,
+  syncBillToSalesPlay,
   getSalesPlaySettings,
   fetchSalesPlayProductsWithInventory,
   fetchSalesPlayCategories,
@@ -953,21 +955,25 @@ function PurchaseEntryForm({
           }
         } else if (paymentMode === 'cash') {
           try {
-            await addDoc(collection(db, 'transactions'), {
+            const txPayload: Record<string, any> = {
               businessId: activeBusiness.id,
               branchId: selectedBranchId || 'global',
-              ownerId: activeBusiness.ownerId || auth.currentUser?.uid || '',
-              userId: auth.currentUser?.uid,
+              ownerId: activeBusiness.ownerId || auth.currentUser?.uid || 'system',
               amount: Number(formData.paidAmount),
               type: 'expense',
               fromAccount: 'cash',
               category: 'Purchase Bill Payment',
-              description: `Paid Inv: ${formData.invoiceNumber} (${selectedSupplier?.name || 'Supplier'})`,
-              date: new Date().toISOString(),
+              description: `Paid Inv: ${finalInvoiceNumber} (${selectedSupplier?.name || 'Supplier'})`,
+              date: logPayload.date || new Date().toISOString(),
+              billId: docRef.id,
               createdAt: serverTimestamp(),
-            });
+            };
+            if (auth.currentUser?.uid) {
+              txPayload.userId = auth.currentUser.uid;
+            }
+            await addDoc(collection(db, 'transactions'), txPayload);
           } catch (cashErr) {
-            console.warn('Cash transaction error:', cashErr);
+            console.error('Cash transaction error:', cashErr);
           }
         }
       }
@@ -985,10 +991,10 @@ function PurchaseEntryForm({
         }
       }
 
-      // 5. SalesPlay Stock Sync
-      // Match and resolve real SalesPlay product ID for each bill item
-      const resolvedItems: { productId: string; quantityToAdd: number; name: string }[] = [];
-      for (const item of billItems) {
+      // 5. SalesPlay Stock & Cost Sync
+      // Match and resolve real SalesPlay items, computing exact per-piece retail cost
+      // (e.g. Chips: 1 pack = 24 pcs, 1.000 OMR / pack -> unitCost = 0.042 OMR/piece in SalesPlay POS)
+      const syncItems = billItems.map(item => {
         let pId = item.productId;
         if (!pId || pId.length < 5 || pId.startsWith('item_')) {
           const found = salesPlayProducts.find(p => 
@@ -1001,42 +1007,44 @@ function PurchaseEntryForm({
           }
         }
 
-        if (pId && pId.length > 5 && !pId.startsWith('item_') && !pId.startsWith('sp_')) {
-          resolvedItems.push({
-            productId: pId,
-            quantityToAdd: Number(item.quantity) || 1,
-            name: item.name,
-          });
-        }
-      }
+        const perPieceCost = item.orderMode === 'pack' && item.piecesPerPack && item.packPrice
+          ? Math.round(((Number(item.packPrice) || 0) / Math.max(1, Number(item.piecesPerPack))) * 1000) / 1000
+          : (Number(item.unitPrice) || 0);
 
-      if (resolvedItems.length > 0) {
+        return {
+          productId: pId,
+          productCode: item.productCode,
+          barcode: item.barcode,
+          name: item.name,
+          quantityToAdd: Number(item.quantity) || 1,
+          unitCost: perPieceCost,
+          salesPrice: Number(item.salesPrice) || 0,
+        };
+      });
+
+      if (syncItems.length > 0) {
         try {
           const spSettings = await getSalesPlaySettings(activeBusiness.id);
           const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[selectedBranchId])
             || spSettings.selectedShopId
             || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
 
-          const updateItems = resolvedItems.map(i => ({
-            productId: i.productId,
-            quantityToAdd: i.quantityToAdd,
-          }));
-
-          const spResult = await updateSalesPlayInventory(mappedShop, updateItems, spSettings.apiToken);
+          const spResult = await syncBillToSalesPlay(mappedShop, syncItems, spSettings.apiToken);
           if (spResult.success) {
             await updateDoc(docRef, { 
               syncedToSalesPlay: true, 
               salesPlayShopId: mappedShop,
-              salesPlayUpdatedCount: spResult.updatedCount 
+              salesPlayUpdatedCount: spResult.stockUpdatedCount,
+              salesPlayCostUpdatedCount: spResult.costUpdatedCount,
             });
-            toast.success(`SalesPlay POS stock gained (+${spResult.updatedCount} items)!`);
+            toast.success(`SalesPlay POS: Stock (+${spResult.stockUpdatedCount} items) & per-piece cost (${spResult.costUpdatedCount} items) updated!`);
           } else {
-            console.warn('SalesPlay stock update failed:', spResult.message);
-            toast.warning(`Bill saved, but SalesPlay stock update notice: ${spResult.message}`);
+            console.warn('SalesPlay sync notice:', spResult.message);
+            toast.warning(`Bill saved, but SalesPlay notice: ${spResult.message}`);
           }
         } catch (spErr: any) {
-          console.warn('SalesPlay inventory update notice:', spErr);
-          toast.warning(`Bill saved, but SalesPlay stock sync notice: ${spErr?.message || 'Network issue'}`);
+          console.warn('SalesPlay sync notice:', spErr);
+          toast.warning(`Bill saved, but SalesPlay sync notice: ${spErr?.message || 'Network issue'}`);
         }
       }
 

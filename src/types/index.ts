@@ -244,6 +244,8 @@ export interface SaleInvoice {
   salesPlayOrderId?: string;
   transaction_id?: string;
   bill_id?: string;
+  receiptDate?: string; // YYYY-MM-DD from SalesPlay POS receipt
+  receiptTime?: string; // HH:mm:ss or 01:13 PM from SalesPlay POS receipt
   date: string;
   createdAt: any;
   notes?: string;

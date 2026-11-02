@@ -49,6 +49,7 @@ import {
   fetchSalesPlayProductsWithInventory,
   syncAllSalesPlayCatalogToFirestore,
   getSalesPlaySettings,
+  updateSalesPlayProductCosts,
   DEFAULT_SALESPLAY_CONFIG,
   FALLBACK_SALESPLAY_PRODUCTS
 } from '@/src/services/salesplay';
@@ -104,6 +105,50 @@ export function PurchaseOrderManager({
 
   // Detailed Modal view
   const [viewingPO, setViewingPO] = useState<PurchaseOrder | null>(null);
+  const [syncingPoCosts, setSyncingPoCosts] = useState(false);
+
+  const handleSyncPoCostsToSalesPlay = async (targetPo: PurchaseOrder) => {
+    if (!targetPo?.items || targetPo.items.length === 0) {
+      toast.error('No items in this Purchase Order to sync');
+      return;
+    }
+    if (!activeBusiness?.id) return;
+    setSyncingPoCosts(true);
+    const toastId = toast.loading(`Updating per-piece costs in SalesPlay POS for PO ${targetPo.poNumber}...`);
+    try {
+      const spSettings = await getSalesPlaySettings(activeBusiness.id);
+      const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[targetPo.branchId || ''])
+        || spSettings.selectedShopId
+        || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+      const costUpdates = targetPo.items.map(i => {
+        const perPieceCost = i.orderMode === 'pack' && i.piecesPerPack && i.packPrice
+          ? Math.round(((Number(i.packPrice) || 0) / Math.max(1, Number(i.piecesPerPack))) * 1000) / 1000
+          : (Number(i.unitPrice) || 0);
+
+        return {
+          productId: i.productId,
+          productCode: i.productCode,
+          barcode: i.barcode,
+          name: i.name,
+          unitCost: perPieceCost,
+          salesPrice: Number(i.salesPrice) || 0,
+          shopId: mappedShop,
+        };
+      });
+
+      const res = await updateSalesPlayProductCosts(costUpdates, spSettings.apiToken, mappedShop);
+      if (res.success && res.updatedCount > 0) {
+        toast.success(`SalesPlay POS: Updated per-piece retail cost for ${res.updatedCount} items!`, { id: toastId });
+      } else {
+        toast.info(res.message || 'Items cost verified in SalesPlay', { id: toastId });
+      }
+    } catch (err: any) {
+      toast.error(`Could not sync to SalesPlay: ${err?.message || 'Network error'}`, { id: toastId });
+    } finally {
+      setSyncingPoCosts(false);
+    }
+  };
 
   const handleStartEditPO = (po: PurchaseOrder) => {
     setEditingPoId(po.id);
@@ -557,6 +602,39 @@ export function PurchaseOrderManager({
           }
         }
 
+        // Automatically sync updated per-piece costs to SalesPlay POS
+        if (items.length > 0 && activeBusiness?.id) {
+          try {
+            const spSettings = await getSalesPlaySettings(activeBusiness.id);
+            const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[branchId || ''])
+              || spSettings.selectedShopId
+              || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+            const costUpdates = items.map(i => {
+              const perPieceCost = i.orderMode === 'pack' && i.piecesPerPack && i.packPrice
+                ? Math.round(((Number(i.packPrice) || 0) / Math.max(1, Number(i.piecesPerPack))) * 1000) / 1000
+                : (Number(i.unitPrice) || 0);
+
+              return {
+                productId: i.productId,
+                productCode: i.productCode,
+                barcode: i.barcode,
+                name: i.name,
+                unitCost: perPieceCost,
+                salesPrice: Number(i.salesPrice) || 0,
+                shopId: mappedShop,
+              };
+            });
+
+            const costRes = await updateSalesPlayProductCosts(costUpdates, spSettings.apiToken, mappedShop);
+            if (costRes.success && costRes.updatedCount > 0) {
+              toast.success(`SalesPlay POS: Updated per-piece retail cost for ${costRes.updatedCount} items!`);
+            }
+          } catch (spErr) {
+            console.warn('Notice syncing PO costs to SalesPlay:', spErr);
+          }
+        }
+
         setViewingPO({
           ...purchaseOrders.find(p => p.id === editingPoId)!,
           ...payload,
@@ -582,6 +660,39 @@ export function PurchaseOrderManager({
           );
         } catch (syncErr) {
           console.warn('Supplier product catalog auto-sync notice from PO:', syncErr);
+        }
+      }
+
+      // Automatically sync updated per-piece costs to SalesPlay POS
+      if (items.length > 0 && activeBusiness?.id) {
+        try {
+          const spSettings = await getSalesPlaySettings(activeBusiness.id);
+          const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[branchId || ''])
+            || spSettings.selectedShopId
+            || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+          const costUpdates = items.map(i => {
+            const perPieceCost = i.orderMode === 'pack' && i.piecesPerPack && i.packPrice
+              ? Math.round(((Number(i.packPrice) || 0) / Math.max(1, Number(i.piecesPerPack))) * 1000) / 1000
+              : (Number(i.unitPrice) || 0);
+
+            return {
+              productId: i.productId,
+              productCode: i.productCode,
+              barcode: i.barcode,
+              name: i.name,
+              unitCost: perPieceCost,
+              salesPrice: Number(i.salesPrice) || 0,
+              shopId: mappedShop,
+            };
+          });
+
+          const costRes = await updateSalesPlayProductCosts(costUpdates, spSettings.apiToken, mappedShop);
+          if (costRes.success && costRes.updatedCount > 0) {
+            toast.success(`SalesPlay POS: Updated per-piece retail cost for ${costRes.updatedCount} items!`);
+          }
+        } catch (spErr) {
+          console.warn('Notice syncing PO costs to SalesPlay:', spErr);
         }
       }
 
@@ -1233,6 +1344,8 @@ export function PurchaseOrderManager({
           branch={branches.find(b => b.id === viewingPO.branchId)}
           onClose={() => setViewingPO(null)}
           onEdit={() => handleStartEditPO(viewingPO)}
+          onSyncCosts={() => handleSyncPoCostsToSalesPlay(viewingPO)}
+          syncingCosts={syncingPoCosts}
           onUseInBillEntry={() => {
             if (onSelectForBillEntry) {
               onSelectForBillEntry(viewingPO);
@@ -1271,6 +1384,8 @@ function PurchaseOrderBillModal({
   onClose,
   onEdit,
   onUseInBillEntry,
+  onSyncCosts,
+  syncingCosts = false,
 }: {
   po: PurchaseOrder;
   currency: string;
@@ -1279,6 +1394,8 @@ function PurchaseOrderBillModal({
   onClose: () => void;
   onEdit?: () => void;
   onUseInBillEntry?: () => void;
+  onSyncCosts?: () => void;
+  syncingCosts?: boolean;
 }) {
   const handleDownloadPdf = () => {
     generatePoPdf({ po, business, branch, currency });
@@ -1308,6 +1425,18 @@ function PurchaseOrderBillModal({
           </div>
 
           <div className="flex items-center gap-2">
+            {onSyncCosts && (
+              <button
+                type="button"
+                onClick={onSyncCosts}
+                disabled={syncingCosts}
+                className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2.5 px-3.5 rounded-xl shadow cursor-pointer transition-all active:scale-95 disabled:opacity-50"
+                title="Sync all item per-piece costs into SalesPlay POS"
+              >
+                <RefreshCw size={14} className={syncingCosts ? "animate-spin" : ""} />
+                <span>Sync Costs to SalesPlay</span>
+              </button>
+            )}
             {onEdit && (
               <button
                 type="button"
