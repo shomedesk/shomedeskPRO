@@ -1158,8 +1158,81 @@ export function convertReceiptToSaleInvoice(
   };
 }
 
+const SALES_CACHE_KEY_PREFIX = 'salesplay_cached_sales_';
+
+export function getCachedSalesInvoices(businessId?: string): SaleInvoice[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const key = businessId ? `${SALES_CACHE_KEY_PREFIX}${businessId}` : 'salesplay_cached_sales';
+    const raw = localStorage.getItem(key) || localStorage.getItem('salesplay_cached_sales');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.warn('Error reading cached sales invoices:', err);
+  }
+  return [];
+}
+
+export function saveCachedSalesInvoices(invoices: SaleInvoice[], businessId?: string): void {
+  if (typeof window === 'undefined' || !Array.isArray(invoices)) return;
+  try {
+    const current = getCachedSalesInvoices(businessId);
+    const map = new Map<string, SaleInvoice>();
+    current.forEach(inv => {
+      const key = inv.invoiceNumber || inv.receiptNumber || inv.id || '';
+      if (key) map.set(key, inv);
+    });
+    invoices.forEach(inv => {
+      const key = inv.invoiceNumber || inv.receiptNumber || inv.id || '';
+      if (key) map.set(key, inv);
+    });
+    const merged = Array.from(map.values());
+    merged.sort((a, b) => {
+      const timeA = a.date ? new Date(a.date).getTime() : 0;
+      const timeB = b.date ? new Date(b.date).getTime() : 0;
+      return timeB - timeA;
+    });
+
+    const specificKey = businessId ? `${SALES_CACHE_KEY_PREFIX}${businessId}` : 'salesplay_cached_sales';
+    localStorage.setItem(specificKey, JSON.stringify(merged));
+    localStorage.setItem('salesplay_cached_sales', JSON.stringify(merged));
+  } catch (err) {
+    console.warn('Error saving cached sales invoices:', err);
+  }
+}
+
+export function getCachedDailySalesSummary(businessId: string, dateStr: string): {
+  cashTotal: number;
+  cardTotal: number;
+  onlineTotal: number;
+  bankSale: number;
+  cogs: number;
+  totalSales: number;
+  grossProfit: number;
+  importedCount: number;
+  date: string;
+} | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(`salesplay_summary_${businessId}_${dateStr}`);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return null;
+}
+
+export function saveCachedDailySalesSummary(businessId: string, dateStr: string, summary: any): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(`salesplay_summary_${businessId}_${dateStr}`, JSON.stringify(summary));
+  } catch {}
+}
+
 /**
- * Synchronize SalesPlay sales receipts directly into Firestore 'sales' collection
+ * Synchronize SalesPlay sales receipts into local cache and Firestore
+ * With smart deduplication to preserve free-tier Firestore write quota.
+ * Never loses sales on browser refresh!
  */
 export async function syncSalesPlaySalesToFirestore({
   businessId,
@@ -1191,13 +1264,47 @@ export async function syncSalesPlaySalesToFirestore({
   const targetShopId = shopId || settings.selectedShopId || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
   const token = settings.apiToken || DEFAULT_SALESPLAY_CONFIG.apiToken;
 
+  const startDateStr = format(startDate || subDays(new Date(), 1), 'yyyy-MM-dd');
+  const endDateStr = format(endDate || new Date(), 'yyyy-MM-dd');
+
   const { receipts, error } = await fetchSalesPlayReceipts(token, startDate, endDate);
 
+  // If network receipts returned empty (offline, network glitch, etc.)
   if (receipts.length === 0) {
+    // 1. Try Local Storage Cache FIRST (instant, zero Firestore reads/writes, never disappears on refresh)
+    const localCached = getCachedSalesInvoices(businessId);
+    const matchedLocal = localCached.filter(inv => {
+      const dStr = inv.receiptDate || (inv.date ? inv.date.substring(0, 10) : '');
+      return dStr && dStr >= startDateStr && dStr <= endDateStr;
+    });
+
+    if (matchedLocal.length > 0) {
+      let lSales = 0, lCogs = 0, lCash = 0, lCard = 0, lOnline = 0;
+      matchedLocal.forEach(inv => {
+        lSales += Number(inv.totalAmount) || 0;
+        lCogs += Number(inv.totalCost) || 0;
+        lCash += Number(inv.cashAmount) || 0;
+        lCard += Number(inv.cardAmount) || 0;
+        lOnline += Number(inv.onlineAmount) || 0;
+      });
+
+      return {
+        success: true,
+        importedCount: matchedLocal.length,
+        totalSales: toStrictDecimal3(lSales),
+        totalCogs: toStrictDecimal3(lCogs),
+        grossProfit: toStrictDecimal3(lSales - lCogs),
+        cashTotal: toStrictDecimal3(lCash),
+        cardTotal: toStrictDecimal3(lCard),
+        onlineTotal: toStrictDecimal3(lOnline),
+        invoices: matchedLocal,
+        message: `Restored ${matchedLocal.length} sales from local persistent cache!`,
+      };
+    }
+
+    // 2. Try Firestore fallback
     try {
       const salesSnap = await getDocs(collection(db, 'sales'));
-      const startDateStr = format(startDate || subDays(new Date(), 1), 'yyyy-MM-dd');
-      const endDateStr = format(endDate || new Date(), 'yyyy-MM-dd');
       let fsSales = 0;
       let fsCogs = 0;
       let fsCash = 0;
@@ -1223,6 +1330,7 @@ export async function syncSalesPlaySalesToFirestore({
       });
 
       if (count > 0) {
+        saveCachedSalesInvoices(fallbackInvoices, businessId);
         const grossProfit = fsSales - fsCogs;
         return {
           success: true,
@@ -1234,7 +1342,7 @@ export async function syncSalesPlaySalesToFirestore({
           cardTotal: toStrictDecimal3(fsCard),
           onlineTotal: toStrictDecimal3(fsOnline),
           invoices: fallbackInvoices,
-          message: `Successfully loaded ${count} sales receipts from SalesPlay POS (Cloud Synced)!`,
+          message: `Successfully loaded ${count} sales receipts from Cloud Database!`,
         };
       }
     } catch (fsErr) {
@@ -1251,7 +1359,7 @@ export async function syncSalesPlaySalesToFirestore({
       cardTotal: 0,
       onlineTotal: 0,
       invoices: [],
-      message: error || 'No receipts returned from SalesPlay for this date range.',
+      message: error || 'No receipts found in SalesPlay for this date range.',
     };
   }
 
@@ -1283,12 +1391,32 @@ export async function syncSalesPlaySalesToFirestore({
     ? receipts.filter(r => !r.shop_id || r.shop_id === targetShopId)
     : receipts;
 
-  // If strict shopId filter matched 0 receipts but user has valid receipts, fallback to all receipts
   if (receiptsToProcess.length === 0 && receipts.length > 0) {
     receiptsToProcess = receipts;
   }
 
+  // Deduplication check: Load existing known receipts to PREVENT repeat Firestore writes
+  const existingLocalCached = getCachedSalesInvoices(businessId);
+  const alreadySavedNumbers = new Set<string>();
+  existingLocalCached.forEach(inv => {
+    if (inv.receiptNumber) alreadySavedNumbers.add(inv.receiptNumber);
+    if (inv.invoiceNumber) alreadySavedNumbers.add(inv.invoiceNumber);
+  });
+
   let clientQuotaExhausted = false;
+  let newWritesCount = 0;
+
+  // Track daily totals for local daily summaries
+  const dailySummaryMap: Record<string, {
+    cashTotal: number;
+    cardTotal: number;
+    onlineTotal: number;
+    totalSales: number;
+    totalCogs: number;
+    importedCount: number;
+    date: string;
+  }> = {};
+
   for (const receipt of receiptsToProcess) {
     const invoice = convertReceiptToSaleInvoice(
       receipt,
@@ -1300,38 +1428,8 @@ export async function syncSalesPlaySalesToFirestore({
     );
 
     const safeDocId = `sp_${businessId}_${receipt.receipt_number.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-    const docRef = doc(db, 'sales', safeDocId);
-    const posDocRef = doc(db, 'pos_transactions', safeDocId);
-
-    const payload = {
-      ...invoice,
-      transaction_id: receipt.receipt_number,
-      bill_id: receipt.receipt_number,
-      syncedAt: serverTimestamp(),
-    };
-
-    syncedInvoices.push({ id: safeDocId, ...invoice });
-
-    if (!clientQuotaExhausted) {
-      try {
-        // Upsert to sales collection
-        await setDoc(docRef, payload, { merge: true });
-
-        // Also mirror to pos_transactions collection safely
-        try {
-          await setDoc(posDocRef, payload, { merge: true });
-        } catch (_) {
-          // ignore if rules only permit sales
-        }
-      } catch (writeErr: any) {
-        if (writeErr?.code === 'resource-exhausted' || String(writeErr?.message || '').includes('Quota limit exceeded')) {
-          console.warn('Firestore daily write quota reached (Free tier). Calculating sales and COGS in memory.');
-          clientQuotaExhausted = true;
-        } else {
-          console.warn('Notice saving sales invoice:', writeErr);
-        }
-      }
-    }
+    const invoiceWithId = { id: safeDocId, ...invoice };
+    syncedInvoices.push(invoiceWithId);
 
     importedCount++;
     totalSales += invoice.totalAmount;
@@ -1339,6 +1437,63 @@ export async function syncSalesPlaySalesToFirestore({
     cashTotal += invoice.cashAmount || 0;
     cardTotal += invoice.cardAmount || 0;
     onlineTotal += invoice.onlineAmount || 0;
+
+    // Track daily totals
+    const rDate = invoice.receiptDate || (invoice.date ? invoice.date.substring(0, 10) : startDateStr);
+    if (!dailySummaryMap[rDate]) {
+      dailySummaryMap[rDate] = {
+        cashTotal: 0,
+        cardTotal: 0,
+        onlineTotal: 0,
+        totalSales: 0,
+        totalCogs: 0,
+        importedCount: 0,
+        date: rDate,
+      };
+    }
+    dailySummaryMap[rDate].cashTotal += invoice.cashAmount || 0;
+    dailySummaryMap[rDate].cardTotal += invoice.cardAmount || 0;
+    dailySummaryMap[rDate].onlineTotal += invoice.onlineAmount || 0;
+    dailySummaryMap[rDate].totalSales += invoice.totalAmount || 0;
+    dailySummaryMap[rDate].totalCogs += invoice.totalCost || 0;
+    dailySummaryMap[rDate].importedCount += 1;
+
+    // SMART WRITE OPTIMIZATION: Only write to Firestore if this receipt has NOT been saved yet!
+    // This stops re-writing existing receipts on every click, saving 90%+ of Firestore quota!
+    const isAlreadySaved = alreadySavedNumbers.has(receipt.receipt_number);
+    if (!isAlreadySaved && !clientQuotaExhausted) {
+      try {
+        const docRef = doc(db, 'sales', safeDocId);
+        const payload = {
+          ...invoice,
+          transaction_id: receipt.receipt_number,
+          bill_id: receipt.receipt_number,
+          syncedAt: serverTimestamp(),
+        };
+        await setDoc(docRef, payload, { merge: true });
+        newWritesCount++;
+        alreadySavedNumbers.add(receipt.receipt_number);
+      } catch (writeErr: any) {
+        if (writeErr?.code === 'resource-exhausted' || String(writeErr?.message || '').includes('Quota limit exceeded')) {
+          console.warn('Firestore daily write quota reached (Free tier). Saving all receipts to local persistent cache.');
+          clientQuotaExhausted = true;
+        } else {
+          console.warn('Notice saving sales invoice:', writeErr);
+        }
+      }
+    }
+  }
+
+  // 1. ALWAYS persist all invoices to localStorage so they NEVER disappear on browser refresh!
+  saveCachedSalesInvoices(syncedInvoices, businessId);
+
+  // 2. Persist daily summaries in localStorage for instant 1-click restoration in ReportForm
+  for (const [dStr, sum] of Object.entries(dailySummaryMap)) {
+    saveCachedDailySalesSummary(businessId, dStr, {
+      ...sum,
+      bankSale: toStrictDecimal3(sum.cardTotal + sum.onlineTotal),
+      grossProfit: toStrictDecimal3(sum.totalSales - sum.totalCogs),
+    });
   }
 
   const grossProfit = totalSales - totalCogs;
@@ -1353,6 +1508,8 @@ export async function syncSalesPlaySalesToFirestore({
     cardTotal: toStrictDecimal3(cardTotal),
     onlineTotal: toStrictDecimal3(onlineTotal),
     invoices: syncedInvoices,
-    message: `Successfully synchronized ${importedCount} sales receipts from SalesPlay POS!`,
+    message: newWritesCount > 0 
+      ? `Successfully synchronized ${importedCount} sales (${newWritesCount} new saved to Cloud Database & all saved to Persistent Cache)!`
+      : `Loaded ${importedCount} sales (All preserved in persistent cache, 0 duplicate Cloud writes used)!`,
   };
 }

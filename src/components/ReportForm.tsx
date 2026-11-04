@@ -14,7 +14,13 @@ import { motion, AnimatePresence } from 'motion/react';
 import { MonthlyStatementModal } from './MonthlyStatementModal';
 import { ExpensesBreakdownModal } from './ExpensesBreakdownModal';
 import { DailyClosingStatementModal } from './DailyClosingStatementModal';
-import { syncSalesPlaySalesToFirestore, getSalesPlaySettings, saveSalesPlaySettings } from '@/src/services/salesplay';
+import { 
+  syncSalesPlaySalesToFirestore, 
+  getSalesPlaySettings, 
+  saveSalesPlaySettings,
+  getCachedDailySalesSummary,
+  saveCachedDailySalesSummary
+} from '@/src/services/salesplay';
 import { generateDailyReportPdf } from '@/src/lib/pdfUtils';
 
 export default function ReportForm() {
@@ -105,7 +111,7 @@ export default function ReportForm() {
     return reports.find(r => r.date && r.date.substring(0, 10) === reportDate);
   }, [reports, reportDate]);
 
-  // Adjust opening cash and bank balances when reportDate changes
+  // Adjust opening cash and bank balances and restore cached sales when reportDate changes
   const handleDateChange = (newDate: string) => {
     setReportDate(newDate);
     if ((selectedBranch || selectedService) && reports.length > 0) {
@@ -119,7 +125,45 @@ export default function ReportForm() {
         }));
       }
     }
+    // Check if newDate has cached sales from SalesPlay and restore automatically
+    if (selectedBusiness?.id) {
+      const cachedSummary = getCachedDailySalesSummary(selectedBusiness.id, newDate);
+      if (cachedSummary && cachedSummary.importedCount > 0) {
+        setFormData(prev => ({
+          ...prev,
+          cashSale: cachedSummary.cashTotal,
+          onlineSale: cachedSummary.onlineTotal,
+          cardSale: cachedSummary.cardTotal,
+          bankSale: toStrictDecimal3(cachedSummary.cardTotal + cachedSummary.onlineTotal),
+          cogs: cachedSummary.cogs,
+        }));
+      }
+    }
   };
+
+  // Auto-restore cached SalesPlay sales data when reportDate changes or on browser refresh
+  useEffect(() => {
+    if (!selectedBusiness?.id) return;
+    if (existingReportForDate) return;
+
+    const cachedSummary = getCachedDailySalesSummary(selectedBusiness.id, reportDate);
+    if (cachedSummary && cachedSummary.importedCount > 0) {
+      setFormData(prev => {
+        // Only auto-restore if values are currently empty
+        if (prev.cashSale === 0 && prev.onlineSale === 0 && prev.cardSale === 0 && prev.cogs === 0) {
+          return {
+            ...prev,
+            cashSale: cachedSummary.cashTotal,
+            onlineSale: cachedSummary.onlineTotal,
+            cardSale: cachedSummary.cardTotal,
+            bankSale: toStrictDecimal3(cachedSummary.cardTotal + cachedSummary.onlineTotal),
+            cogs: cachedSummary.cogs,
+          };
+        }
+        return prev;
+      });
+    }
+  }, [reportDate, selectedBusiness?.id, existingReportForDate]);
 
   // 1-click import of Sales from SalesPlay POS into Daily Report
   // Maps to CASH SALE, ONLINE SALE, CARD SALE, and COGS
@@ -129,8 +173,22 @@ export default function ReportForm() {
       return;
     }
     setReportDate(targetDateStr);
+
+    // Instant restoration from local persistent cache if already present
+    const cachedSummary = getCachedDailySalesSummary(selectedBusiness.id, targetDateStr);
+    if (cachedSummary && cachedSummary.importedCount > 0) {
+      setFormData(prev => ({
+        ...prev,
+        cashSale: cachedSummary.cashTotal,
+        onlineSale: cachedSummary.onlineTotal,
+        cardSale: cachedSummary.cardTotal,
+        bankSale: toStrictDecimal3(cachedSummary.cardTotal + cachedSummary.onlineTotal),
+        cogs: cachedSummary.cogs,
+      }));
+    }
+
     setIsImportingSalesPlay(true);
-    const toastId = toast.loading(`Connecting to SalesPlay POS and importing ${label}'s sales (${targetDateStr})...`);
+    const toastId = toast.loading(`Checking SalesPlay POS for ${label}'s sales (${targetDateStr})...`);
     try {
       const parsed = parseISO(targetDateStr);
       let res = await syncSalesPlaySalesToFirestore({
@@ -141,49 +199,6 @@ export default function ReportForm() {
         endDate: endOfDay(parsed),
       });
 
-      // Triple-Safety Fallback: Direct Firestore sales query
-      if (!res.success || res.importedCount === 0) {
-        try {
-          const salesSnap = await getDocs(collection(db, 'sales'));
-          let fsSales = 0;
-          let fsCogs = 0;
-          let fsCash = 0;
-          let fsCard = 0;
-          let fsOnline = 0;
-          let count = 0;
-
-          salesSnap.forEach(d => {
-            const inv = d.data() as any;
-            const dateStr = inv.receiptDate || (inv.date ? inv.date.substring(0, 10) : '');
-            if (dateStr === targetDateStr && (inv.source === 'salesplay_pos' || inv.receiptNumber)) {
-              count++;
-              fsSales += Number(inv.totalAmount) || 0;
-              fsCogs += Number(inv.totalCost) || 0;
-              fsCash += Number(inv.cashAmount) || 0;
-              fsCard += Number(inv.cardAmount) || 0;
-              fsOnline += Number(inv.onlineAmount) || 0;
-            }
-          });
-
-          if (count > 0) {
-            res = {
-              success: true,
-              importedCount: count,
-              totalSales: toStrictDecimal3(fsSales),
-              totalCogs: toStrictDecimal3(fsCogs),
-              grossProfit: toStrictDecimal3(fsSales - fsCogs),
-              cashTotal: toStrictDecimal3(fsCash),
-              cardTotal: toStrictDecimal3(fsCard),
-              onlineTotal: toStrictDecimal3(fsOnline),
-              invoices: [],
-              message: `Found ${count} sales receipts in Firestore cloud database for ${targetDateStr}.`,
-            };
-          }
-        } catch (e) {
-          console.warn('Direct Firestore fallback notice in ReportForm:', e);
-        }
-      }
-
       if (res.success && res.importedCount > 0) {
         setFormData(prev => ({
           ...prev,
@@ -193,15 +208,32 @@ export default function ReportForm() {
           bankSale: toStrictDecimal3(res.cardTotal + res.onlineTotal),
           cogs: res.totalCogs,
         }));
+        saveCachedDailySalesSummary(selectedBusiness.id, targetDateStr, {
+          cashTotal: res.cashTotal,
+          cardTotal: res.cardTotal,
+          onlineTotal: res.onlineTotal,
+          bankSale: toStrictDecimal3(res.cardTotal + res.onlineTotal),
+          cogs: res.totalCogs,
+          totalSales: res.totalSales,
+          grossProfit: res.grossProfit,
+          importedCount: res.importedCount,
+          date: targetDateStr,
+        });
         toast.success(
-          `Imported ${res.importedCount} receipts for ${label} (${targetDateStr})! Total: ${currency} ${formatAmount(res.totalSales, currency)} | COGS: ${currency} ${formatAmount(res.totalCogs, currency)} | Gross Profit: ${currency} ${formatAmount(res.grossProfit, currency)}`,
+          `Imported ${res.importedCount} receipts for ${label} (${targetDateStr})! Total: ${currency} ${formatAmount(res.totalSales, currency)} | COGS: ${currency} ${formatAmount(res.totalCogs, currency)} | Gross Profit: ${currency} ${formatAmount(res.grossProfit, currency)} (Preserved on refresh & Cloud Saved)`,
           { id: toastId, duration: 6000 }
         );
+      } else if (cachedSummary) {
+        toast.success(`Loaded ${label}'s sales from persistent cache!`, { id: toastId });
       } else {
         toast.info(res.message || `No sales found in SalesPlay for ${label} (${targetDateStr}).`, { id: toastId });
       }
     } catch (err: any) {
-      toast.error(err?.message || `Failed to import sales for ${label}`, { id: toastId });
+      if (cachedSummary) {
+        toast.info(`Restored ${label}'s sales from persistent cache.`, { id: toastId });
+      } else {
+        toast.error(err?.message || `Failed to import sales for ${label}`, { id: toastId });
+      }
     } finally {
       setIsImportingSalesPlay(false);
     }

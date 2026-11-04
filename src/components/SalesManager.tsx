@@ -53,8 +53,13 @@ import {
 } from 'lucide-react';
 import { Barcode } from './Barcode';
 import { SalesPlaySyncModal } from './SalesPlaySyncModal';
-import { fetchSalesPlayProductsWithInventory, syncSalesPlaySalesToFirestore } from '@/src/services/salesplay';
 import { toast } from 'sonner';
+import { 
+  fetchSalesPlayProductsWithInventory, 
+  syncSalesPlaySalesToFirestore,
+  getCachedSalesInvoices,
+  saveCachedSalesInvoices 
+} from '@/src/services/salesplay';
 import * as XLSX from 'xlsx';
 import { cn } from '@/src/lib/utils';
 
@@ -74,7 +79,9 @@ export default function SalesManager() {
     ? 'OMR' 
     : (selectedBranch?.currency || selectedBusiness?.currency || 'OMR');
 
-  const [invoices, setInvoices] = useState<SaleInvoice[]>([]);
+  const [invoices, setInvoices] = useState<SaleInvoice[]>(() => {
+    return getCachedSalesInvoices(selectedBusiness?.id);
+  });
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [paymentFilter, setPaymentFilter] = useState<string>('all');
@@ -160,6 +167,7 @@ export default function SalesManager() {
               const timeB = b.date ? new Date(b.date).getTime() : 0;
               return timeB - timeA;
             });
+            saveCachedSalesInvoices(merged, biz.id);
             return merged;
           });
         }
@@ -201,6 +209,15 @@ export default function SalesManager() {
     loadProducts();
   }, [selectedBusiness, isAllBusinessesSelected]);
 
+  // Immediately load cached invoices when selectedBusiness changes
+  useEffect(() => {
+    const cached = getCachedSalesInvoices(selectedBusiness?.id);
+    if (cached.length > 0) {
+      setInvoices(cached);
+      setLoading(false);
+    }
+  }, [selectedBusiness?.id]);
+
   // Listen to Sales Invoices
   useEffect(() => {
     if (!selectedBusiness && !isAllBusinessesSelected) return;
@@ -221,17 +238,36 @@ export default function SalesManager() {
         ...doc.data()
       } as SaleInvoice));
 
+      // Merge with local persistent cache so quota exhaustion or network drop never loses items
+      const cached = getCachedSalesInvoices(selectedBusiness?.id);
+      const map = new Map<string, SaleInvoice>();
+      cached.forEach(inv => {
+        const key = inv.invoiceNumber || inv.receiptNumber || inv.id || '';
+        if (key) map.set(key, inv);
+      });
+      list.forEach(inv => {
+        const key = inv.invoiceNumber || inv.receiptNumber || inv.id || '';
+        if (key) map.set(key, inv);
+      });
+
+      const merged = Array.from(map.values());
       // Sort newest to oldest in-memory to avoid Firestore multi-field index requirements
-      list.sort((a, b) => {
+      merged.sort((a, b) => {
         const timeA = a.date ? new Date(a.date).getTime() : 0;
         const timeB = b.date ? new Date(b.date).getTime() : 0;
         return timeB - timeA;
       });
 
-      setInvoices(list);
+      setInvoices(merged);
+      saveCachedSalesInvoices(merged, selectedBusiness?.id);
       setLoading(false);
     }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'sales');
+      console.warn('Firestore sales query notice:', error);
+      // On error (e.g. quota limit reached), preserve and show local cached sales
+      const cached = getCachedSalesInvoices(selectedBusiness?.id);
+      if (cached.length > 0) {
+        setInvoices(cached);
+      }
       setLoading(false);
     });
 

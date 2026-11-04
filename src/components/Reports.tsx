@@ -32,6 +32,7 @@ import { formatAmount, toStrictDecimal3 } from '@/src/lib/currencyUtils';
 import { downloadElementAsPdf, generateBusinessReportPdf } from '@/src/lib/pdfUtils';
 import * as XLSX from 'xlsx';
 import { toast } from 'sonner';
+import { getCachedSalesInvoices } from '@/src/services/salesplay';
 
 export type ReportTab = 
   | 'daily' 
@@ -135,8 +136,15 @@ export default function Reports() {
         });
       };
 
+      // Merge with cached invoices to ensure offline and quota-safe reporting
+      const cached = getCachedSalesInvoices(selectedBusiness?.id);
+      const invoiceMap = new Map<string, any>();
+      cached.forEach(inv => invoiceMap.set(inv.invoiceNumber || inv.id, inv));
+      s.forEach(inv => invoiceMap.set(inv.invoiceNumber || inv.id, inv));
+      const combinedSales = Array.from(invoiceMap.values());
+
       setDailyReportsData(filterByDate(dr));
-      setSalesData(filterByDate(s));
+      setSalesData(filterByDate(combinedSales));
       setPurchasesData(filterByDate(p));
       setExpensesData(filterByDate(exp));
       setTransactionsData(filterByDate(tx));
