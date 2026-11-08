@@ -95,6 +95,11 @@ function executeSalesPlayRequest(
 
 // SalesPlay POS Reverse Proxy - Works in both dev and production
 app.all('/api/salesplay*', async (req, res) => {
+  if (req.path === '/api/salesplay/trigger-cloud-sync' || req.originalUrl?.includes('/trigger-cloud-sync')) {
+    runAutoSalesPlaySync();
+    return res.json({ success: true, message: 'Cloud sync running' });
+  }
+
   let targetPath = (req.originalUrl || req.url).replace(/^\/api\/salesplay/, '');
   if (!targetPath || targetPath === '') targetPath = '/';
 
@@ -328,6 +333,190 @@ app.all('/api/salesplay*', async (req, res) => {
       message: error?.message || 'Unable to communicate with SalesPlay servers'
     });
   }
+});
+
+import { auth, db } from './src/lib/firebase.js';
+import { signInAnonymously } from 'firebase/auth';
+import { doc, setDoc, getDoc, getDocs, collection } from 'firebase/firestore';
+
+// Background Automated Cloud Sync Engine
+// Syncs SalesPlay products & receipts directly into Firestore so ANY launched device or PWA has immediate data!
+async function runAutoSalesPlaySync(): Promise<void> {
+  try {
+    if (!auth.currentUser) {
+      await signInAnonymously(auth);
+    }
+
+    const bSnap = await getDocs(collection(db, 'businesses'));
+    const bIds = ['global', 'default'];
+    bSnap.forEach(d => { if (d.id && !bIds.includes(d.id)) bIds.push(d.id); });
+
+    const todayStr = new Date().toISOString().substring(0, 10);
+    const yesterdayStr = new Date(Date.now() - 86400000).toISOString().substring(0, 10);
+    const datesToSync = [todayStr, yesterdayStr];
+
+    const rawAuth = `Bearer ${DEFAULT_SALESPLAY_API_TOKEN}`;
+    const headers = { Accept: '*/*', Authorization: rawAuth };
+
+    // 1. Sync Receipts & Daily Summaries
+    for (const dStr of datesToSync) {
+      let pageCount = 0;
+      let cursor = '';
+      const allReceipts: any[] = [];
+      const seen = new Set<string>();
+
+      while (pageCount < 20) {
+        pageCount++;
+        const body: Record<string, any> = {
+          created_at_min: `${dStr} 00:00:00`,
+          created_at_max: `${dStr} 23:59:59`,
+        };
+        if (cursor) body.cursor = cursor;
+        const res = await executeSalesPlayRequest('/receipts', 'POST', headers, body);
+        if (res.statusCode !== 200) break;
+        let parsed: any;
+        try { parsed = JSON.parse(res.data); } catch { break; }
+        const recs = parsed.receipts || [];
+        if (!Array.isArray(recs) || recs.length === 0) break;
+        for (const r of recs) {
+          if (r.receipt_number && !seen.has(r.receipt_number)) {
+            seen.add(r.receipt_number);
+            allReceipts.push(r);
+          }
+        }
+        if (!parsed.cursor || parsed.cursor === cursor) break;
+        cursor = parsed.cursor;
+      }
+
+      let totalSales = 0, cashTotal = 0, cardTotal = 0, onlineTotal = 0;
+      for (const r of allReceipts) {
+        const amt = Number(r.total_money) || 0;
+        totalSales += amt;
+        const pType = String(r.payment_type || r.payment_mode || '').toLowerCase();
+        if (pType.includes('card') || pType.includes('visa') || pType.includes('master')) {
+          cardTotal += amt;
+        } else if (pType.includes('online') || pType.includes('transfer')) {
+          onlineTotal += amt;
+        } else {
+          cashTotal += amt;
+        }
+
+        // Save individual receipt in sales collection
+        const primaryBizId = bIds.find(id => id !== 'global' && id !== 'default') || 'main';
+        const safeDocId = `sp_${primaryBizId}_${r.receipt_number.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+        await setDoc(doc(db, 'sales', safeDocId), {
+          businessId: primaryBizId,
+          branchId: 'main',
+          receiptNumber: r.receipt_number,
+          invoiceNumber: r.receipt_number,
+          receiptDate: dStr,
+          date: (r.receipt_date || dStr) + 'T' + (r.receipt_time || '12:00:00'),
+          totalAmount: Math.round(amt * 1000) / 1000,
+          totalCost: 0,
+          cashAmount: (pType.includes('card') || pType.includes('online')) ? 0 : amt,
+          cardAmount: pType.includes('card') ? amt : 0,
+          onlineAmount: pType.includes('online') ? amt : 0,
+          paymentMethod: pType.includes('card') ? 'card' : pType.includes('online') ? 'online' : 'cash',
+          source: 'salesplay_pos',
+          status: 'completed',
+        }, { merge: true });
+      }
+
+      totalSales = Math.round(totalSales * 1000) / 1000;
+      cashTotal = Math.round(cashTotal * 1000) / 1000;
+      cardTotal = Math.round(cardTotal * 1000) / 1000;
+      onlineTotal = Math.round(onlineTotal * 1000) / 1000;
+      const bankSale = Math.round((cardTotal + onlineTotal) * 1000) / 1000;
+
+      for (const bId of bIds) {
+        await setDoc(doc(db, 'salesDailySummaries', `${bId}_${dStr}`), {
+          businessId: bId,
+          date: dStr,
+          cashTotal,
+          cardTotal,
+          onlineTotal,
+          bankSale,
+          totalSales,
+          totalCogs: 0,
+          grossProfit: totalSales,
+          importedCount: allReceipts.length,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      }
+    }
+
+    // 2. Sync All Products
+    const allProducts: any[] = [];
+    const seenIds = new Set<string>();
+    let prodCursor = '';
+    let prodPageCount = 0;
+
+    while (prodPageCount < 30) {
+      prodPageCount++;
+      const body: Record<string, any> = { limit: 250 };
+      if (prodCursor) body.cursor = prodCursor;
+      const res = await executeSalesPlayRequest('/products', 'GET', headers, body);
+      if (res.statusCode !== 200) break;
+      let parsed: any;
+      try { parsed = JSON.parse(res.data); } catch { break; }
+      const prods = parsed.products || [];
+      if (!Array.isArray(prods) || prods.length === 0) break;
+      for (const p of prods) {
+        const k = p.id || p.product_code;
+        if (k && !seenIds.has(k)) {
+          seenIds.add(k);
+          allProducts.push(p);
+        } else if (!k) {
+          allProducts.push(p);
+        }
+      }
+      if (!parsed.cursor || parsed.cursor === prodCursor) break;
+      prodCursor = parsed.cursor;
+    }
+
+    if (allProducts.length > 0) {
+      const invRes = await executeSalesPlayRequest('/inventory', 'GET', headers, { limit: 250 });
+      let levels: any[] = [];
+      try { levels = JSON.parse(invRes.data).inventory_levels || []; } catch {}
+      const stockMap: Record<string, number> = {};
+      for (const lvl of levels) {
+        stockMap[lvl.product_id] = Number(lvl.in_stock) || 0;
+      }
+
+      const mapped = allProducts.map(p => ({
+        id: p.id,
+        product_code: p.product_code || '',
+        product_name: (p.product_name || 'Unnamed Item').trim(),
+        category: (p.category || 'General').trim(),
+        sub_category: (p.sub_category || '').trim(),
+        barcode: (p.barcode || p.product_code || '').trim(),
+        cost: Number(p.cost) || 0,
+        price: Number(p.price) || 0,
+        measurement: p.measurement || '',
+        image_url: p.image_url || '',
+        stock_control: p.stock_control ?? true,
+        in_stock: stockMap[p.id] !== undefined ? stockMap[p.id] : 0,
+      }));
+
+      await setDoc(doc(db, 'salesPlayCatalog', 'all_products'), {
+        products: mapped,
+        count: mapped.length,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+    }
+  } catch (syncErr) {
+    console.warn('Background SalesPlay auto-sync notice:', syncErr);
+  }
+}
+
+// Start background auto-sync 3 seconds after boot, and repeat every 3 minutes
+setTimeout(() => { runAutoSalesPlaySync(); }, 3000);
+setInterval(() => { runAutoSalesPlaySync(); }, 3 * 60 * 1000);
+
+// Endpoint to trigger manual sync from frontend
+app.all('/api/salesplay/trigger-cloud-sync', async (_req, res) => {
+  runAutoSalesPlaySync();
+  res.json({ success: true, message: 'Cloud sync running' });
 });
 
 // Health check endpoint

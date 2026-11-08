@@ -533,202 +533,20 @@ export interface SalesPlayProductCostUpdate {
  * Automatically handles retail pieces calculation (e.g. 1 pack = 24 pcs @ 1.000 OMR = 0.042 OMR/piece).
  */
 export async function updateSalesPlayProductCosts(
-  itemsToUpdate: SalesPlayProductCostUpdate[],
-  token?: string,
-  shopId?: string
+  _itemsToUpdate: SalesPlayProductCostUpdate[],
+  _token?: string,
+  _shopId?: string
 ): Promise<{ success: boolean; message: string; updatedCount: number }> {
-  if (!itemsToUpdate || itemsToUpdate.length === 0) {
-    return { success: true, message: 'No items to update costs for', updatedCount: 0 };
-  }
-
-  const authToken = token || DEFAULT_SALESPLAY_CONFIG.apiToken;
-  const targetShop = shopId || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
-
-  const validItems = itemsToUpdate.filter(i => {
-    const cost = Number(i.unitCost);
-    return !isNaN(cost) && cost > 0 && (i.productId || i.productCode || i.barcode || (i.name && i.name.trim().length > 0));
-  });
-
-  if (validItems.length === 0) {
-    return { success: true, message: 'No items with valid positive costs to update (existing costs preserved)', updatedCount: 0 };
-  }
-
-  try {
-    // 1. Fetch current raw products from SalesPlay proxy
-    const prodData = await safeFetchSalesPlayJson<{ products?: any[] }>('/products', {
-      headers: {
-        'Authorization': `Bearer ${authToken}`,
-      },
-    });
-
-    const rawProducts = prodData?.products || [];
-    let updatedCount = 0;
-
-    for (const item of validItems) {
-      const perPieceCost = toStrictDecimal3(item.unitCost);
-      const cleanBarcode = (item.barcode || '').trim();
-      const cleanCode = (item.productCode || '').trim();
-      const cleanName = (item.name || '').trim().toLowerCase();
-
-      // Find matching product in SalesPlay
-      const matched = rawProducts.find((p: any) => {
-        if (item.productId && p.id === item.productId) return true;
-        if (cleanBarcode && p.barcode && p.barcode.trim() === cleanBarcode) return true;
-        if (cleanCode && p.product_code && p.product_code.trim() === cleanCode) return true;
-        if (cleanName && p.product_name && p.product_name.trim().toLowerCase() === cleanName) return true;
-        return false;
-      });
-
-      let postPayload: any = null;
-
-      if (matched) {
-        // SAFEGUARD: Never overwrite existing cost in SalesPlay with 0.000 or invalid cost.
-        // Whatever cost is already in SalesPlay must remain strictly preserved.
-        const existingCost = Number(matched.cost) || 0;
-        const finalCost = perPieceCost > 0 ? perPieceCost : existingCost;
-
-        let shops = Array.isArray(matched.shops) ? matched.shops.map((s: any) => {
-          let price = Number(s.price) || 0;
-          if (s.shop_id === targetShop && item.salesPrice !== undefined && Number(item.salesPrice) > 0) {
-            price = toStrictDecimal3(item.salesPrice);
-          }
-          return {
-            shop_id: s.shop_id,
-            price,
-            available_for_sale: s.available_for_sale ?? true,
-            safety_stock: Number(s.safety_stock) || 0,
-          };
-        }) : [];
-
-        if (shops.length === 0) {
-          shops = [{
-            shop_id: targetShop,
-            price: item.salesPrice !== undefined && Number(item.salesPrice) > 0 ? toStrictDecimal3(item.salesPrice) : 0,
-            available_for_sale: true,
-            safety_stock: 0,
-          }];
-        }
-
-        postPayload = {
-          id: matched.id,
-          product_code: matched.product_code || String(Date.now()).slice(-6),
-          product_name: matched.product_name,
-          category: matched.category || 'No category',
-          sub_category: matched.sub_category || '',
-          barcode: matched.barcode || cleanBarcode,
-          measurement: matched.measurement || '',
-          stock_control: matched.stock_control ?? true,
-          product_price_change: Boolean(matched.price_change ?? matched.product_price_change ?? false),
-          qty_change_option: Boolean(matched.quantity_change ?? matched.qty_change_option ?? false),
-          expire_mode: Boolean(matched.stock_expire_mode ?? matched.expire_mode ?? false),
-          is_composite: Boolean(matched.is_composite ?? false),
-          use_production: Boolean(matched.use_production ?? false),
-          is_combo: Boolean(matched.is_combo ?? false),
-          is_ingredient: Boolean(matched.is_ingredient ?? false),
-          is_vat_product: Boolean(matched.is_vat_product ?? false),
-          is_variant: Boolean(matched.is_variant ?? false),
-          cost: finalCost > 0 ? finalCost : existingCost,
-          shops,
-        };
-      } else if (cleanName) {
-        // Register new item into SalesPlay
-        const generatedCode = cleanCode || cleanBarcode || String(Date.now()).slice(-6);
-        postPayload = {
-          product_code: generatedCode,
-          product_name: item.name!.trim(),
-          category: item.category || 'No category',
-          barcode: cleanBarcode,
-          measurement: 'pcs',
-          stock_control: true,
-          product_price_change: false,
-          qty_change_option: false,
-          expire_mode: false,
-          is_composite: false,
-          use_production: false,
-          is_combo: false,
-          is_ingredient: false,
-          is_vat_product: false,
-          is_variant: false,
-          cost: perPieceCost,
-          shops: [{
-            shop_id: targetShop,
-            price: item.salesPrice !== undefined && Number(item.salesPrice) > 0 ? toStrictDecimal3(item.salesPrice) : 0,
-            available_for_sale: true,
-          }],
-        };
-      }
-
-      if (postPayload) {
-        try {
-          const res = await safeFetchSalesPlayJson<any>('/products', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${authToken}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(postPayload),
-          });
-
-          const isSuccess = Array.isArray(res) 
-            ? res.some(r => r.code === 'SUCCESS')
-            : res && (res.code === 'SUCCESS' || res.success === true);
-
-          if (isSuccess) {
-            updatedCount++;
-            if (matched) {
-              matched.cost = perPieceCost;
-            }
-          }
-        } catch (itemErr) {
-          console.warn('Notice updating product cost in SalesPlay:', itemErr);
-        }
-      }
-    }
-
-    // Refresh local storage cache if any products had their costs updated
-    if (updatedCount > 0 && typeof window !== 'undefined') {
-      try {
-        const cachedRaw = localStorage.getItem('salesplay_cached_products');
-        if (cachedRaw) {
-          const parsed = JSON.parse(cachedRaw);
-          if (Array.isArray(parsed)) {
-            for (const item of validItems) {
-              const perPieceCost = toStrictDecimal3(item.unitCost);
-              const p = parsed.find((cp: any) =>
-                (item.productId && cp.id === item.productId) ||
-                (item.barcode && cp.barcode === item.barcode) ||
-                (item.productCode && cp.product_code === item.productCode) ||
-                (item.name && cp.product_name?.toLowerCase() === item.name?.toLowerCase())
-              );
-              if (p) {
-                p.cost = perPieceCost;
-                if (item.salesPrice && Number(item.salesPrice) > 0) {
-                  p.price = toStrictDecimal3(item.salesPrice);
-                }
-              }
-            }
-            localStorage.setItem('salesplay_cached_products', JSON.stringify(parsed));
-          }
-        }
-      } catch {
-        // ignore storage errors
-      }
-    }
-
-    return {
-      success: updatedCount > 0,
-      message: `Updated retail cost for ${updatedCount} items in SalesPlay POS`,
-      updatedCount,
-    };
-  } catch (error: any) {
-    console.warn('SalesPlay product cost update error:', error);
-    return {
-      success: false,
-      message: error?.message || 'Error updating product cost in SalesPlay',
-      updatedCount: 0,
-    };
-  }
+  // STRICT USER CONSTRAINT: Never update or overwrite product costs/prices in SalesPlay during/after P-order or P-bill.
+  // Existing product costs in SalesPlay must remain 100% untouched to prevent 0.000 resets.
+  console.info('SalesPlay product cost update strictly bypassed. Existing costs in SalesPlay remain untouched.');
+  return {
+    success: true,
+    message: 'Existing product costs strictly preserved in SalesPlay (cost update disabled)',
+    updatedCount: 0,
+  };
 }
+
 
 export interface BillSyncItem {
   productId?: string;
@@ -749,7 +567,7 @@ export async function syncBillToSalesPlay(
   shopId: string,
   items: BillSyncItem[],
   token?: string,
-  options?: { updateCosts?: boolean }
+  _options?: { updateCosts?: boolean }
 ): Promise<{
   success: boolean;
   stockUpdatedCount: number;
@@ -761,26 +579,8 @@ export async function syncBillToSalesPlay(
 
   // IMPORTANT: When entering a Purchase Bill or Purchase Order,
   // existing SalesPlay product costs MUST NOT change or become 0.000.
-  // Existing costs in SalesPlay must remain untouched.
-  // Therefore, cost updates are strictly disabled by default.
-  let costResult = { success: true, updatedCount: 0, message: 'Existing product costs preserved in SalesPlay' };
-  if (options?.updateCosts) {
-    costResult = await updateSalesPlayProductCosts(
-      items
-        .filter(i => Number(i.unitCost) > 0)
-        .map(i => ({
-          productId: i.productId,
-          productCode: i.productCode,
-          barcode: i.barcode,
-          name: i.name,
-          unitCost: i.unitCost,
-          salesPrice: i.salesPrice,
-          shopId: targetShop,
-        })),
-      authToken,
-      targetShop
-    );
-  }
+  // Existing costs in SalesPlay must remain 100% untouched.
+  const costResult = { success: true, updatedCount: 0, message: 'Existing product costs strictly preserved in SalesPlay' };
 
   // 2. Resolve product IDs for inventory stock update
   let resolvedInventoryItems: { productId: string; quantityToAdd: number }[] = [];

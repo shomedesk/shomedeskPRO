@@ -225,8 +225,11 @@ export default function ReportForm() {
           { id: toastId, duration: 6000 }
         );
       } else {
-        // Fallback 1: Check Firestore cloud daily summary (works across all launched devices)
-        const cloudSummary = await getCloudDailySalesSummary(selectedBusiness.id, targetDateStr);
+        // Fallback 1: Check Firestore cloud daily summary (works across all launched devices & PWAs)
+        let cloudSummary = await getCloudDailySalesSummary(selectedBusiness.id, targetDateStr);
+        if (!cloudSummary) {
+          cloudSummary = await getCloudDailySalesSummary('global', targetDateStr);
+        }
         if (cloudSummary && (cloudSummary.importedCount > 0 || cloudSummary.totalSales > 0)) {
           setFormData(prev => ({
             ...prev,
@@ -244,12 +247,9 @@ export default function ReportForm() {
           return;
         }
 
-        // Fallback 2: Check Firestore 'sales' collection directly
+        // Fallback 2: Check Firestore 'sales' collection directly (Index-free scan)
         try {
-          const salesSnap = await getDocs(query(
-            collection(db, 'sales'),
-            where('businessId', '==', selectedBusiness.id)
-          ));
+          const salesSnap = await getDocs(collection(db, 'sales'));
           let fsSales = 0, fsCogs = 0, fsCash = 0, fsCard = 0, fsOnline = 0, count = 0;
           salesSnap.forEach(d => {
             const inv = d.data();

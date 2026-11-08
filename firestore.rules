@@ -498,6 +498,11 @@ service cloud.firestore {
       allow delete: if isAdmin() || isDefaultAdmin();
     }
 
+    match /salesDailySummaries/{summaryId} {
+      allow read, write: if isAuthenticated();
+      allow delete: if isAdmin() || isDefaultAdmin();
+    }
+
     match /salesPlaySync/{docId} {
       allow read, write: if isAuthenticated();
       allow delete: if isAdmin() || isDefaultAdmin();
