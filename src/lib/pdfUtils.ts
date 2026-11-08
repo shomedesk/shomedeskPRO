@@ -1553,3 +1553,500 @@ export function generateBusinessReportPdf({
   }
 }
 
+/**
+ * Generates and downloads a compact receipt-sized vector PDF for Purchase Orders,
+ * formatted specifically for thermal POS roll printers (58mm default or 80mm width).
+ */
+export function generatePoThermalPdf({
+  po,
+  business,
+  branch,
+  currency = 'OMR',
+  paperWidth = '58mm',
+}: {
+  po: PurchaseOrder;
+  business?: Business | null;
+  branch?: Branch | null;
+  currency?: string;
+  paperWidth?: '58mm' | '80mm';
+}): boolean {
+  const is58 = paperWidth === '58mm';
+  const toastId = toast.loading(`Generating ${is58 ? '58mm' : '80mm'} Thermal PO Slip...`);
+  try {
+    const items = po.items || [];
+    const pageWidth = is58 ? 58 : 80;
+    const margin = is58 ? 2.5 : 4;
+
+    // Dynamic height calculation for continuous thermal roll paper
+    const estimatedHeight = Math.max(
+      is58 ? 130 : 140,
+      Math.ceil((is58 ? 65 : 70) + items.length * (is58 ? 16 : 15) + (po.notes ? 16 : 0) + 40)
+    );
+
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: [pageWidth, estimatedHeight],
+    });
+
+    let curY = is58 ? 5 : 7;
+
+    // 1. Business Header (Thermal Monochrome Centered)
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(is58 ? 10.5 : 13);
+    doc.setTextColor(0, 0, 0);
+    doc.text(business?.name || 'SHOMEDESK BUSINESS', pageWidth / 2, curY, { align: 'center' });
+    curY += is58 ? 4 : 5;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(is58 ? 6.5 : 8);
+    if (branch) {
+      doc.text(`Branch: ${branch.name} (${branch.branchCode || 'BR'})`, pageWidth / 2, curY, { align: 'center' });
+      curY += is58 ? 3.5 : 4;
+    }
+    if (business?.mobileNumber) {
+      doc.text(`Tel: ${business.mobileNumber}`, pageWidth / 2, curY, { align: 'center' });
+      curY += is58 ? 3.5 : 4;
+    }
+
+    // Dotted separator line
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.3);
+    doc.setLineDashPattern([1, 1], 0);
+    doc.line(margin, curY, pageWidth - margin, curY);
+    doc.setLineDashPattern([], 0);
+    curY += is58 ? 4 : 5;
+
+    // 2. Order Header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(is58 ? 8.5 : 10);
+    doc.text('PURCHASE ORDER SLIP', pageWidth / 2, curY, { align: 'center' });
+    curY += is58 ? 3.8 : 4.5;
+
+    doc.setFontSize(is58 ? 7.5 : 8.5);
+    doc.text(`PO #: ${po.poNumber || 'N/A'}`, pageWidth / 2, curY, { align: 'center' });
+    curY += is58 ? 3.5 : 4;
+
+    const createdDate = po.createdAt?.toDate
+      ? format(po.createdAt.toDate(), 'dd/MM/yyyy hh:mm a')
+      : format(new Date(), 'dd/MM/yyyy hh:mm a');
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(is58 ? 6.5 : 7.5);
+    doc.text(`Date: ${createdDate}`, pageWidth / 2, curY, { align: 'center' });
+    curY += 2;
+
+    // Barcode for PO number
+    const poBarcodeImg = generateBarcodeBase64(po.poNumber || 'PO-001', { height: 18, width: 1.0, fontSize: 7 });
+    if (poBarcodeImg) {
+      const bcWidth = is58 ? 34 : 44;
+      doc.addImage(poBarcodeImg, 'PNG', (pageWidth - bcWidth) / 2, curY, bcWidth, is58 ? 8 : 10);
+      curY += is58 ? 10 : 12;
+    } else {
+      curY += 2;
+    }
+
+    // Dotted separator line
+    doc.setLineDashPattern([1, 1], 0);
+    doc.line(margin, curY, pageWidth - margin, curY);
+    doc.setLineDashPattern([], 0);
+    curY += 3.5;
+
+    // 3. Supplier Details
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(is58 ? 7 : 8);
+    doc.text(`Supplier: ${po.supplierName || 'Unknown'}`, margin, curY);
+    curY += is58 ? 3.5 : 4;
+    if (po.supplierPhone) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(is58 ? 6.5 : 7.5);
+      doc.text(`Phone: ${po.supplierPhone}`, margin, curY);
+      curY += is58 ? 3.5 : 4;
+    }
+
+    // 4. Items Table (Formatted for 58mm or 80mm roll)
+    const tableData = items.map((item, idx) => {
+      const isPack = item.orderMode === 'pack' && item.packCount;
+      const packDetail = isPack
+        ? `\n[${item.packCount} Pk x ${item.piecesPerPack || 24} pcs = ${item.quantity} pcs]`
+        : '';
+      const barcodeTxt = item.barcode ? `\nBC: ${item.barcode}` : '';
+      const nameCol = `${idx + 1}. ${item.name || 'Item'}${packDetail}${barcodeTxt}`;
+
+      const qtyCol = isPack && item.packPrice
+        ? `${item.packCount} Pk\n@ ${formatAmount(item.packPrice, currency)}`
+        : `${item.quantity} ${item.unit || 'pcs'}\n@ ${formatAmount(item.unitPrice, currency)}`;
+
+      const totalCol = formatAmount(item.totalPrice || ((Number(item.quantity) || 1) * (Number(item.unitPrice) || 0)), currency);
+
+      return [nameCol, qtyCol, totalCol];
+    });
+
+    autoTable(doc, {
+      startY: curY,
+      head: [['Item Description', 'Qty / Rate', `Total (${currency})`]],
+      body: tableData,
+      theme: 'plain',
+      headStyles: {
+        fillColor: [240, 240, 240],
+        textColor: [0, 0, 0],
+        fontStyle: 'bold',
+        fontSize: is58 ? 6.5 : 7.5,
+        halign: 'left',
+        lineWidth: 0.2,
+        lineColor: [0, 0, 0],
+      },
+      bodyStyles: {
+        fontSize: is58 ? 6 : 7,
+        textColor: [0, 0, 0],
+        valign: 'top',
+        cellPadding: is58 ? 1 : 1.5,
+      },
+      columnStyles: is58
+        ? {
+            0: { cellWidth: 25 },
+            1: { cellWidth: 14, halign: 'right' },
+            2: { cellWidth: 14, halign: 'right', fontStyle: 'bold' },
+          }
+        : {
+            0: { cellWidth: 38 },
+            1: { cellWidth: 18, halign: 'right' },
+            2: { cellWidth: 16, halign: 'right', fontStyle: 'bold' },
+          },
+      margin: { left: margin, right: margin },
+    });
+
+    const finalY = ((doc as any).lastAutoTable?.finalY ?? (curY + 20)) + 3;
+
+    // 5. Total & Notes
+    doc.setLineDashPattern([1, 1], 0);
+    doc.line(margin, finalY, pageWidth - margin, finalY);
+    doc.setLineDashPattern([], 0);
+
+    let summaryY = finalY + 3.5;
+    const totalQty = items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(is58 ? 6.5 : 7.5);
+    doc.text(`Total Items: ${items.length} (${totalQty} units)`, margin, summaryY);
+    summaryY += is58 ? 3.8 : 4.5;
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(is58 ? 8.5 : 10.5);
+    doc.text(`GRAND TOTAL: ${currency} ${formatAmount(po.totalAmount || 0, currency)}`, margin, summaryY);
+    summaryY += is58 ? 4.5 : 5;
+
+    if (po.notes) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(is58 ? 6 : 7);
+      doc.text(`Notes: ${po.notes}`, margin, summaryY, { maxWidth: pageWidth - margin * 2 });
+      summaryY += 5;
+    }
+
+    // 6. Thermal Footer & Cut Line
+    summaryY += 2;
+    doc.setLineDashPattern([1, 1], 0);
+    doc.line(margin, summaryY, pageWidth - margin, summaryY);
+    doc.setLineDashPattern([], 0);
+    summaryY += 3.5;
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(is58 ? 6.5 : 7.5);
+    doc.text('*** END OF PURCHASE ORDER ***', pageWidth / 2, summaryY, { align: 'center' });
+    summaryY += 3;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(is58 ? 5.5 : 6.5);
+    doc.text(`Printed: ${format(new Date(), 'dd/MM/yyyy HH:mm:ss')}`, pageWidth / 2, summaryY, { align: 'center' });
+
+    const cleanPoNum = String(po.poNumber || 'Order').replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'PO';
+    const safeFilename = `PO_Thermal_${is58 ? '58mm' : '80mm'}_${cleanPoNum}_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
+    doc.save(safeFilename);
+    toast.success(`Thermal ${is58 ? '58mm' : '80mm'} PO Slip downloaded successfully!`, { id: toastId });
+    return true;
+  } catch (err: any) {
+    console.error('Failed to generate thermal PO PDF:', err);
+    toast.error('Failed to generate thermal PO PDF', { id: toastId });
+    return false;
+  }
+}
+
+export function generatePoThermal58Pdf(args: {
+  po: PurchaseOrder;
+  business?: Business | null;
+  branch?: Branch | null;
+  currency?: string;
+}): boolean {
+  return generatePoThermalPdf({ ...args, paperWidth: '58mm' });
+}
+
+/**
+ * Generates and downloads a comprehensive vector PDF statement for a Supplier,
+ * showing all purchase bills, dates, mal/products taken, payment modes, and outstanding balances.
+ */
+export function generateSupplierStatementPdf({
+  supplier,
+  logs,
+  currency = 'OMR',
+  business,
+  branch,
+  totals,
+  periodLabel = 'All Time',
+}: {
+  supplier: Supplier;
+  logs: PurchaseLog[];
+  currency?: string;
+  business?: Business | null;
+  branch?: Branch | null;
+  totals: {
+    billCount: number;
+    totalPurchased: number;
+    totalPaid: number;
+    totalDue: number;
+    totalItemsCount: number;
+  };
+  periodLabel?: string;
+}): boolean {
+  const toastId = toast.loading('Generating Supplier Statement PDF...');
+  try {
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4',
+    });
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 12;
+
+    // 1. Business Header
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.setTextColor(15, 23, 42); // slate-900
+    doc.text(business?.name || 'SHOMEDESK BUSINESS', margin, 18);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    doc.setTextColor(100, 116, 139); // slate-500
+    let curY = 23;
+    if (branch) {
+      doc.text(`Branch: ${branch.name} (${branch.branchCode || 'BR'}) • ${branch.location || ''}`, margin, curY);
+      curY += 4.5;
+    }
+    if (business?.mobileNumber) {
+      doc.text(`Phone: ${business.mobileNumber}`, margin, curY);
+      curY += 4.5;
+    }
+
+    // Statement Badge on Right
+    doc.setFillColor(16, 185, 129); // emerald-500
+    doc.roundedRect(pageWidth - margin - 52, 11, 52, 8, 2, 2, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text('SUPPLIER STATEMENT', pageWidth - margin - 50, 16.5);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`Period: ${periodLabel}`, pageWidth - margin, 24, { align: 'right' });
+    doc.text(`Generated: ${format(new Date(), 'dd MMM yyyy, hh:mm a')}`, pageWidth - margin, 28.5, { align: 'right' });
+
+    // Divider
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.5);
+    doc.line(margin, 34, pageWidth - margin, 34);
+
+    // 2. Supplier Party Info Card
+    doc.setFillColor(248, 250, 252); // slate-50
+    doc.setDrawColor(226, 232, 240);
+    doc.roundedRect(margin, 37, pageWidth - margin * 2, 22, 2, 2, 'FD');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text('PARTY / SUPPLIER INFORMATION', margin + 4, 42);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text(supplier.name, margin + 4, 48);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(71, 85, 105);
+    const phoneTxt = supplier.phone ? `Phone: ${supplier.phone}` : '';
+    const contactTxt = supplier.contactPerson ? ` | Contact: ${supplier.contactPerson}` : '';
+    const catTxt = supplier.category ? ` | Category: ${supplier.category}` : '';
+    doc.text(`${phoneTxt}${contactTxt}${catTxt}`, margin + 4, 53.5);
+
+    // Master Total Due in Party Box (Right)
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    doc.text('MASTER PARTY DUE', pageWidth - margin - 4, 42, { align: 'right' });
+
+    doc.setFontSize(12);
+    if ((supplier.totalDue || 0) > 0) {
+      doc.setTextColor(225, 29, 72); // rose-600
+    } else {
+      doc.setTextColor(16, 185, 129); // emerald-600
+    }
+    doc.text(`${currency} ${formatAmount(supplier.totalDue || 0, currency)}`, pageWidth - margin - 4, 49, { align: 'right' });
+
+    // 3. Summary Cards Row
+    const cardY = 62;
+    const cardWidth = (pageWidth - margin * 2 - 6) / 3;
+
+    // Total Mal Taken Card
+    doc.setFillColor(239, 246, 255); // blue-50
+    doc.setDrawColor(191, 219, 254);
+    doc.roundedRect(margin, cardY, cardWidth, 14, 2, 2, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(37, 99, 235);
+    doc.text('TOTAL MAL TAKEN', margin + 3, cardY + 4.5);
+    doc.setFontSize(10);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`${currency} ${formatAmount(totals.totalPurchased, currency)}`, margin + 3, cardY + 10.5);
+
+    // Total Paid Card
+    doc.setFillColor(236, 253, 245); // emerald-50
+    doc.setDrawColor(167, 243, 208);
+    doc.roundedRect(margin + cardWidth + 3, cardY, cardWidth, 14, 2, 2, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(5, 150, 105);
+    doc.text('TOTAL PAID AMOUNT', margin + cardWidth + 6, cardY + 4.5);
+    doc.setFontSize(10);
+    doc.setTextColor(5, 150, 105);
+    doc.text(`${currency} ${formatAmount(totals.totalPaid, currency)}`, margin + cardWidth + 6, cardY + 10.5);
+
+    // Period Due Balance Card
+    doc.setFillColor(255, 241, 242); // rose-50
+    doc.setDrawColor(254, 205, 211);
+    doc.roundedRect(margin + (cardWidth + 3) * 2, cardY, cardWidth, 14, 2, 2, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(225, 29, 72);
+    doc.text('STATEMENT DUE BALANCE', margin + (cardWidth + 3) * 2 + 3, cardY + 4.5);
+    doc.setFontSize(10);
+    doc.setTextColor(225, 29, 72);
+    doc.text(`${currency} ${formatAmount(totals.totalDue, currency)}`, margin + (cardWidth + 3) * 2 + 3, cardY + 10.5);
+
+    // 4. Bills Table
+    const tableRows = logs.map((log, idx) => {
+      const dateStr = log.date ? format(new Date(log.date), 'dd/MM/yyyy') : 'N/A';
+      const bill = Number(log.billAmount || (log as any).amount || 0);
+      const paid = Number(log.paidAmount || 0);
+      const due = Number(log.netDue ?? Math.max(0, bill - paid));
+      const payMode = log.paymentMode || log.paymentType || 'CASH';
+
+      // Item summary
+      const itemsSummary = (log.items || [])
+        .map(i => `${i.name} (${i.quantity}${i.orderMode === 'pack' && i.piecesPerPack ? `pk` : `pcs`})`)
+        .slice(0, 3)
+        .join(', ');
+      const moreItems = (log.items?.length || 0) > 3 ? ` +${log.items!.length - 3} more` : '';
+      const malDescription = itemsSummary ? `${itemsSummary}${moreItems}` : 'General Purchase';
+
+      return [
+        String(idx + 1),
+        dateStr,
+        log.invoiceNumber || 'N/A',
+        malDescription,
+        payMode,
+        `${formatAmount(bill, currency)}`,
+        `${formatAmount(paid, currency)}`,
+        `${formatAmount(due, currency)}`,
+      ];
+    });
+
+    autoTable(doc, {
+      startY: 80,
+      head: [['#', 'Date', 'Bill / Invoice #', 'Products / Mal Taken', 'Payment', `Bill Cost (${currency})`, `Paid (${currency})`, `Due (${currency})`]],
+      body: tableRows,
+      theme: 'striped',
+      showHead: 'everyPage',
+      headStyles: {
+        fillColor: [16, 185, 129], // emerald-500
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 8,
+      },
+      bodyStyles: {
+        fontSize: 7.5,
+        textColor: [30, 41, 59],
+        valign: 'middle',
+      },
+      columnStyles: {
+        0: { cellWidth: 8, halign: 'center' },
+        1: { cellWidth: 20, halign: 'center' },
+        2: { cellWidth: 28, fontStyle: 'bold' },
+        3: { cellWidth: 'auto' },
+        4: { cellWidth: 20, halign: 'center' },
+        5: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+        6: { cellWidth: 22, halign: 'right' },
+        7: { cellWidth: 22, halign: 'right', fontStyle: 'bold' },
+      },
+      foot: [[
+        'TOTAL',
+        '',
+        `${totals.billCount} Bills`,
+        `${totals.totalItemsCount} Total Units`,
+        '',
+        `${formatAmount(totals.totalPurchased, currency)}`,
+        `${formatAmount(totals.totalPaid, currency)}`,
+        `${formatAmount(totals.totalDue, currency)}`,
+      ]],
+      footStyles: {
+        fillColor: [15, 23, 42], // slate-900
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 8,
+        halign: 'right',
+      },
+      margin: { top: 20, bottom: 25, left: margin, right: margin },
+    });
+
+    // 5. Signature & Sign-off Block on Last Page
+    const finalTableY = (doc as any).lastAutoTable.finalY + 12;
+    let signY = finalTableY;
+    if (signY > pageHeight - 35) {
+      doc.addPage();
+      signY = 30;
+    }
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(71, 85, 105);
+
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.4);
+    doc.line(margin, signY, margin + 55, signY);
+    doc.text('Authorized Purchaser Signature', margin, signY + 4);
+
+    doc.line(pageWidth - margin - 55, signY, pageWidth - margin, signY);
+    doc.text('Supplier Acceptance & Stamp', pageWidth - margin - 55, signY + 4);
+
+    // Multi-page page numbers
+    const totalPages = (doc as any).internal.getNumberOfPages();
+    for (let p = 1; p <= totalPages; p++) {
+      doc.setPage(p);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.setTextColor(148, 163, 184);
+      doc.text(`Page ${p} of ${totalPages}`, pageWidth - margin, pageHeight - 8, { align: 'right' });
+      doc.text(`Generated on ${format(new Date(), 'yyyy-MM-dd HH:mm')} • ShomeDesk Retail POS System`, margin, pageHeight - 8);
+    }
+
+    const cleanName = String(supplier?.name || 'Supplier').replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'Supplier';
+    const filename = `Supplier_Statement_${cleanName}_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
+    doc.save(filename);
+    toast.success('Supplier statement PDF downloaded successfully!', { id: toastId });
+    return true;
+  } catch (err: any) {
+    console.error('Failed to generate supplier statement PDF:', err);
+    toast.error('Failed to generate supplier statement PDF', { id: toastId });
+    return false;
+  }
+}
+

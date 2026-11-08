@@ -53,7 +53,8 @@ import {
   Layers,
   Sparkles,
   RefreshCw,
-  Edit3
+  Edit3,
+  FileSpreadsheet
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { format } from 'date-fns';
@@ -67,6 +68,7 @@ import { EditPurchaseBillModal } from './EditPurchaseBillModal';
 import { Barcode } from './Barcode';
 import { ProductSearchAndScan } from './ProductSearchAndScan';
 import { SupplierProductProfileModal } from './SupplierProductProfileModal';
+import { SupplierStatementModal } from './SupplierStatementModal';
 import {
   getSupplierProducts,
   saveSupplierProductsFromBill
@@ -341,6 +343,8 @@ export default function Suppliers() {
             businesses={businesses}
             branches={branches}
             isAllBusinessesSelected={isAllBusinessesSelected}
+            purchaseLogs={purchaseLogs}
+            selectedBusiness={selectedBusiness}
           />
         </div>
       )}
@@ -1037,7 +1041,7 @@ function PurchaseEntryForm({
               salesPlayUpdatedCount: spResult.stockUpdatedCount,
               salesPlayCostUpdatedCount: spResult.costUpdatedCount,
             });
-            toast.success(`SalesPlay POS: Stock (+${spResult.stockUpdatedCount} items) & per-piece cost (${spResult.costUpdatedCount} items) updated!`);
+            toast.success(`SalesPlay POS: Stock (+${spResult.stockUpdatedCount} items) updated! (Existing item costs preserved)`);
           } else {
             console.warn('SalesPlay sync notice:', spResult.message);
             toast.warning(`Bill saved, but SalesPlay notice: ${spResult.message}`);
@@ -2101,12 +2105,29 @@ function RecentLogs({
   );
 }
 
-function SupplierDirectory({ suppliers, currency, businesses, branches, isAllBusinessesSelected }: { suppliers: Supplier[]; currency: string; businesses: Business[]; branches: Branch[]; isAllBusinessesSelected: boolean }) {
+function SupplierDirectory({ 
+  suppliers, 
+  currency, 
+  businesses, 
+  branches, 
+  isAllBusinessesSelected,
+  purchaseLogs = [],
+  selectedBusiness
+}: { 
+  suppliers: Supplier[]; 
+  currency: string; 
+  businesses: Business[]; 
+  branches: Branch[]; 
+  isAllBusinessesSelected: boolean;
+  purchaseLogs?: PurchaseLog[];
+  selectedBusiness?: Business | null;
+}) {
   const { userProfile } = useBusiness();
   const isAdmin = userProfile?.role === 'admin' || auth.currentUser?.email === 'shomedesk@gmail.com';
   const [searchTerm, setSearchTerm] = useState('');
   const [deletingSupplierId, setDeletingSupplierId] = useState<string | null>(null);
   const [activeCatalogSupplier, setActiveCatalogSupplier] = useState<Supplier | null>(null);
+  const [activeStatementSupplier, setActiveStatementSupplier] = useState<Supplier | null>(null);
 
   const handleDeleteSupplier = async (supplier: Supplier) => {
     if (!supplier.id || !isAdmin) return;
@@ -2196,7 +2217,19 @@ function SupplierDirectory({ suppliers, currency, businesses, branches, isAllBus
                   <p className="text-[10px] text-slate-500 truncate max-w-xs sm:max-w-md">{s.address}</p>
                 )}
               </div>
-              <div className="flex items-center gap-3 pl-4">
+              <div className="flex items-center gap-2 sm:gap-3 pl-4 shrink-0">
+                {/* Full Statement Button */}
+                <button
+                  type="button"
+                  onClick={() => setActiveStatementSupplier(s)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 rounded-xl text-xs font-bold transition-all cursor-pointer shrink-0 shadow-sm shadow-emerald-950/20 active:scale-95"
+                  title={`View full purchase & payment statement for ${s.name}`}
+                >
+                  <FileSpreadsheet size={13} />
+                  <span>Statement</span>
+                </button>
+
+                {/* Product Profile Button */}
                 <button
                   type="button"
                   onClick={() => setActiveCatalogSupplier(s)}
@@ -2207,7 +2240,7 @@ function SupplierDirectory({ suppliers, currency, businesses, branches, isAllBus
                   <span className="hidden sm:inline">Product Profile</span>
                 </button>
 
-                <div className="text-right">
+                <div className="text-right min-w-[70px]">
                   <p className={cn("text-sm font-black font-mono", (s.totalDue || 0) > 0 ? "text-rose-400" : "text-emerald-400")}>
                     {currency} {formatAmount(s.totalDue || 0, currency)}
                   </p>
@@ -2241,6 +2274,19 @@ function SupplierDirectory({ suppliers, currency, businesses, branches, isAllBus
           currency={currency}
           businessId={activeCatalogSupplier.businessId || ''}
           onClose={() => setActiveCatalogSupplier(null)}
+        />
+      )}
+
+      {/* Supplier Full Purchase & Payment Statement Modal */}
+      {activeStatementSupplier && (
+        <SupplierStatementModal
+          supplier={activeStatementSupplier}
+          currency={currency}
+          logs={purchaseLogs}
+          branches={branches}
+          businesses={businesses}
+          selectedBusiness={selectedBusiness}
+          onClose={() => setActiveStatementSupplier(null)}
         />
       )}
     </div>

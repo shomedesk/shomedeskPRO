@@ -40,7 +40,8 @@ import {
   Download,
   Zap,
   RefreshCw,
-  Edit3
+  Edit3,
+  Bluetooth
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { Barcode } from './Barcode';
@@ -55,7 +56,14 @@ import {
 } from '@/src/services/salesplay';
 import { cn } from '@/src/lib/utils';
 import { formatAmount, isWeightItem, toStrictDecimal3 } from '@/src/lib/currencyUtils';
-import { generatePoPdf } from '@/src/lib/pdfUtils';
+import { generatePoPdf, generatePoThermalPdf } from '@/src/lib/pdfUtils';
+import { 
+  printPoViaBluetooth, 
+  directPrint58mmHtml, 
+  getPrinterStatus, 
+  subscribePrinterState 
+} from '@/src/lib/bluetoothPrinter';
+import { BluetoothPrinterModal } from './BluetoothPrinterModal';
 import { SupplierProductProfileModal } from './SupplierProductProfileModal';
 import {
   getSupplierProducts,
@@ -106,6 +114,79 @@ export function PurchaseOrderManager({
   // Detailed Modal view
   const [viewingPO, setViewingPO] = useState<PurchaseOrder | null>(null);
   const [syncingPoCosts, setSyncingPoCosts] = useState(false);
+  const [isPrinterModalOpen, setIsPrinterModalOpen] = useState(false);
+  const [isBtConnected, setIsBtConnected] = useState(false);
+  const [btName, setBtName] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unsub = subscribePrinterState((conn, name) => {
+      setIsBtConnected(conn);
+      setBtName(name);
+    });
+    return unsub;
+  }, []);
+
+  const handleDirectPrintPo = async (targetPo: PurchaseOrder) => {
+    const status = getPrinterStatus();
+    if (status.isConnected) {
+      await printPoViaBluetooth({ po: targetPo, business: activeBusiness, branch: branches.find(b => b.id === targetPo.branchId), currency });
+    } else {
+      // 1-Click Direct 58mm Browser Thermal Print (no download)
+      const branchObj = branches.find(b => b.id === targetPo.branchId);
+      const dateStr = targetPo.createdAt?.toDate 
+        ? format(targetPo.createdAt.toDate(), 'dd/MM/yyyy hh:mm a') 
+        : format(new Date(), 'dd/MM/yyyy hh:mm a');
+
+      const itemsHtml = (targetPo.items || []).map((item, idx) => {
+        const isPack = item.orderMode === 'pack' && item.packCount;
+        const packTxt = isPack && item.piecesPerPack ? `<br><small style="color:#333">[${item.packCount} Pk x ${item.piecesPerPack} pcs = ${item.quantity} pcs]</small>` : '';
+        const bcTxt = item.barcode ? `<br><small style="color:#555">BC: ${item.barcode}</small>` : '';
+        const qtyStr = isPack ? `${item.packCount} Pk` : `${item.quantity || 1} pcs`;
+        const rateStr = isPack && item.packPrice ? `@${formatAmount(item.packPrice, currency)}` : `@${formatAmount(item.unitPrice, currency)}`;
+        const totalStr = formatAmount(item.totalPrice || ((Number(item.quantity) || 1) * (Number(item.unitPrice) || 0)), currency);
+        return `
+          <div class="item-row">
+            <div class="item-name">${idx + 1}. ${item.name || 'Item'}${packTxt}${bcTxt}</div>
+            <div class="item-meta">
+              <span>${qtyStr} ${rateStr}</span>
+              <span class="bold">${totalStr}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      const totalQty = (targetPo.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+
+      const htmlBody = `
+        <div class="center title">${activeBusiness?.name || 'SHOMEDESK POS'}</div>
+        ${branchObj ? `<div class="center subtitle">Branch: ${branchObj.name}</div>` : ''}
+        ${activeBusiness?.mobileNumber ? `<div class="center subtitle">Tel: ${activeBusiness.mobileNumber}</div>` : ''}
+        <div class="divider"></div>
+        <div class="center bold" style="font-size:11px;">PURCHASE ORDER SLIP</div>
+        <div class="center bold">PO #: ${targetPo.poNumber || 'N/A'}</div>
+        <div class="center subtitle">Date: ${dateStr}</div>
+        <div class="divider"></div>
+        <div class="row"><span class="bold">Supplier:</span><span>${targetPo.supplierName || 'Unknown'}</span></div>
+        ${targetPo.supplierPhone ? `<div class="row"><span>Phone:</span><span>${targetPo.supplierPhone}</span></div>` : ''}
+        <div class="divider-solid"></div>
+        <div class="row bold"><span>Item</span><span>Qty / Total (${currency})</span></div>
+        <div class="divider"></div>
+        ${itemsHtml}
+        <div class="divider-solid"></div>
+        <div class="row"><span>Total Items (${targetPo.items?.length || 0}):</span><span class="bold">${totalQty} units</span></div>
+        <div class="row total-box"><span>GRAND TOTAL:</span><span>${currency} ${formatAmount(targetPo.totalAmount || 0, currency)}</span></div>
+        ${targetPo.notes ? `<div class="divider"></div><div style="font-size:8.5px;">Notes: ${targetPo.notes}</div>` : ''}
+        <div class="divider"></div>
+        <div class="center" style="font-size:8px; margin-top:4px;">*** END OF ORDER ***</div>
+        <div class="center subtitle">${format(new Date(), 'dd/MM/yyyy HH:mm:ss')}</div>
+      `;
+
+      directPrint58mmHtml({
+        title: `PO_${targetPo.poNumber || 'Order'}`,
+        htmlBody,
+      });
+    }
+  };
 
   const handleSyncPoCostsToSalesPlay = async (targetPo: PurchaseOrder) => {
     if (!targetPo?.items || targetPo.items.length === 0) {
@@ -121,27 +202,34 @@ export function PurchaseOrderManager({
         || spSettings.selectedShopId
         || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
 
-      const costUpdates = targetPo.items.map(i => {
-        const perPieceCost = i.orderMode === 'pack' && i.piecesPerPack && i.packPrice
-          ? Math.round(((Number(i.packPrice) || 0) / Math.max(1, Number(i.piecesPerPack))) * 1000) / 1000
-          : (Number(i.unitPrice) || 0);
+      const costUpdates = targetPo.items
+        .map(i => {
+          const perPieceCost = i.orderMode === 'pack' && i.piecesPerPack && i.packPrice
+            ? Math.round(((Number(i.packPrice) || 0) / Math.max(1, Number(i.piecesPerPack))) * 1000) / 1000
+            : (Number(i.unitPrice) || 0);
 
-        return {
-          productId: i.productId,
-          productCode: i.productCode,
-          barcode: i.barcode,
-          name: i.name,
-          unitCost: perPieceCost,
-          salesPrice: Number(i.salesPrice) || 0,
-          shopId: mappedShop,
-        };
-      });
+          return {
+            productId: i.productId,
+            productCode: i.productCode,
+            barcode: i.barcode,
+            name: i.name,
+            unitCost: perPieceCost,
+            salesPrice: Number(i.salesPrice) || 0,
+            shopId: mappedShop,
+          };
+        })
+        .filter(u => u.unitCost > 0);
+
+      if (costUpdates.length === 0) {
+        toast.info('No positive unit costs to update. Existing SalesPlay costs preserved.', { id: toastId });
+        return;
+      }
 
       const res = await updateSalesPlayProductCosts(costUpdates, spSettings.apiToken, mappedShop);
       if (res.success && res.updatedCount > 0) {
         toast.success(`SalesPlay POS: Updated per-piece retail cost for ${res.updatedCount} items!`, { id: toastId });
       } else {
-        toast.info(res.message || 'Items cost verified in SalesPlay', { id: toastId });
+        toast.info(res.message || 'Items cost verified in SalesPlay (existing costs preserved)', { id: toastId });
       }
     } catch (err: any) {
       toast.error(`Could not sync to SalesPlay: ${err?.message || 'Network error'}`, { id: toastId });
@@ -602,38 +690,7 @@ export function PurchaseOrderManager({
           }
         }
 
-        // Automatically sync updated per-piece costs to SalesPlay POS
-        if (items.length > 0 && activeBusiness?.id) {
-          try {
-            const spSettings = await getSalesPlaySettings(activeBusiness.id);
-            const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[branchId || ''])
-              || spSettings.selectedShopId
-              || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
-
-            const costUpdates = items.map(i => {
-              const perPieceCost = i.orderMode === 'pack' && i.piecesPerPack && i.packPrice
-                ? Math.round(((Number(i.packPrice) || 0) / Math.max(1, Number(i.piecesPerPack))) * 1000) / 1000
-                : (Number(i.unitPrice) || 0);
-
-              return {
-                productId: i.productId,
-                productCode: i.productCode,
-                barcode: i.barcode,
-                name: i.name,
-                unitCost: perPieceCost,
-                salesPrice: Number(i.salesPrice) || 0,
-                shopId: mappedShop,
-              };
-            });
-
-            const costRes = await updateSalesPlayProductCosts(costUpdates, spSettings.apiToken, mappedShop);
-            if (costRes.success && costRes.updatedCount > 0) {
-              toast.success(`SalesPlay POS: Updated per-piece retail cost for ${costRes.updatedCount} items!`);
-            }
-          } catch (spErr) {
-            console.warn('Notice syncing PO costs to SalesPlay:', spErr);
-          }
-        }
+        // PO edits saved. Note: SalesPlay product costs remain untouched and preserved as requested.
 
         setViewingPO({
           ...purchaseOrders.find(p => p.id === editingPoId)!,
@@ -663,38 +720,7 @@ export function PurchaseOrderManager({
         }
       }
 
-      // Automatically sync updated per-piece costs to SalesPlay POS
-      if (items.length > 0 && activeBusiness?.id) {
-        try {
-          const spSettings = await getSalesPlaySettings(activeBusiness.id);
-          const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[branchId || ''])
-            || spSettings.selectedShopId
-            || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
-
-          const costUpdates = items.map(i => {
-            const perPieceCost = i.orderMode === 'pack' && i.piecesPerPack && i.packPrice
-              ? Math.round(((Number(i.packPrice) || 0) / Math.max(1, Number(i.piecesPerPack))) * 1000) / 1000
-              : (Number(i.unitPrice) || 0);
-
-            return {
-              productId: i.productId,
-              productCode: i.productCode,
-              barcode: i.barcode,
-              name: i.name,
-              unitCost: perPieceCost,
-              salesPrice: Number(i.salesPrice) || 0,
-              shopId: mappedShop,
-            };
-          });
-
-          const costRes = await updateSalesPlayProductCosts(costUpdates, spSettings.apiToken, mappedShop);
-          if (costRes.success && costRes.updatedCount > 0) {
-            toast.success(`SalesPlay POS: Updated per-piece retail cost for ${costRes.updatedCount} items!`);
-          }
-        } catch (spErr) {
-          console.warn('Notice syncing PO costs to SalesPlay:', spErr);
-        }
-      }
+      // PO created. Note: SalesPlay product costs remain untouched and preserved as requested.
 
       // Immediately open printable PO Bill modal for the newly generated order!
       setViewingPO({ id: docRef.id, ...payload } as any);
@@ -1210,13 +1236,28 @@ export function PurchaseOrderManager({
 
       {/* Purchase Orders List */}
       <div className="bg-[#1E293B] p-6 rounded-3xl border border-slate-800 shadow-xl space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-slate-300">
             <FileText size={18} />
             <h3 className="text-xs font-black uppercase tracking-[0.2em]">
               Recent Purchase Orders ({purchaseOrders.length})
             </h3>
           </div>
+
+          <button
+            type="button"
+            onClick={() => setIsPrinterModalOpen(true)}
+            className={cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border active:scale-95 shadow-sm",
+              isBtConnected
+                ? "bg-emerald-600/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-600/30"
+                : "bg-blue-600/10 text-blue-400 border-blue-500/30 hover:bg-blue-600/20"
+            )}
+            title="Connect or configure 58mm Bluetooth thermal printer"
+          >
+            <Bluetooth size={14} className={isBtConnected ? "text-emerald-400" : ""} />
+            <span>{isBtConnected ? `58mm: ${btName || 'Connected'}` : 'Bluetooth 58mm'}</span>
+          </button>
         </div>
 
         <div className="space-y-3">
@@ -1280,15 +1321,37 @@ export function PurchaseOrderManager({
                     <span>Edit PO</span>
                   </button>
 
-                  {/* Download PO button */}
+                  {/* 1. Direct Print (58mm) - Wireless Bluetooth or 1-Click Browser Print */}
+                  <button
+                    type="button"
+                    onClick={() => handleDirectPrintPo(po)}
+                    className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black py-2.5 px-3 rounded-xl shadow-md shadow-emerald-950/40 transition-all cursor-pointer active:scale-95"
+                    title={isBtConnected ? "Direct wireless print to 58mm Bluetooth printer" : "Direct 58mm print (no download)"}
+                  >
+                    <Printer size={14} />
+                    <span>{isBtConnected ? 'BT Print (58mm)' : 'Print (58mm)'}</span>
+                  </button>
+
+                  {/* 2. Download 58mm Roll PDF */}
+                  <button
+                    type="button"
+                    onClick={() => generatePoThermalPdf({ po, business: activeBusiness, branch: branches.find(b => b.id === po.branchId), currency, paperWidth: '58mm' })}
+                    className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold py-2.5 px-2.5 rounded-xl shadow-md shadow-amber-950/40 transition-all cursor-pointer active:scale-95"
+                    title="Download 58mm roll vector PDF file"
+                  >
+                    <Download size={13} />
+                    <span>58mm PDF</span>
+                  </button>
+
+                  {/* 3. Download Normal A4 PO PDF */}
                   <button
                     type="button"
                     onClick={() => generatePoPdf({ po, business: activeBusiness, branch: branches.find(b => b.id === po.branchId), currency })}
-                    className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black py-2.5 px-3.5 rounded-xl shadow-md shadow-indigo-950/40 transition-all cursor-pointer active:scale-95"
-                    title="Download vector PO Bill with Barcodes"
+                    className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2.5 px-2.5 rounded-xl shadow-md shadow-indigo-950/40 transition-all cursor-pointer active:scale-95"
+                    title="Download standard A4 vector Purchase Order PDF"
                   >
-                    <Download size={15} />
-                    Download PDF
+                    <Download size={13} />
+                    <span>A4 PDF</span>
                   </button>
 
                   <button
@@ -1346,6 +1409,9 @@ export function PurchaseOrderManager({
           onEdit={() => handleStartEditPO(viewingPO)}
           onSyncCosts={() => handleSyncPoCostsToSalesPlay(viewingPO)}
           syncingCosts={syncingPoCosts}
+          onOpenPrinterModal={() => setIsPrinterModalOpen(true)}
+          isBtConnected={isBtConnected}
+          btName={btName}
           onUseInBillEntry={() => {
             if (onSelectForBillEntry) {
               onSelectForBillEntry(viewingPO);
@@ -1354,6 +1420,12 @@ export function PurchaseOrderManager({
           }}
         />
       )}
+
+      {/* 58mm Bluetooth Thermal Printer Setup & Test Modal */}
+      <BluetoothPrinterModal
+        isOpen={isPrinterModalOpen}
+        onClose={() => setIsPrinterModalOpen(false)}
+      />
 
       {/* Supplier Products Profile Catalog Modal */}
       {viewingProfileSupplier && (
@@ -1386,6 +1458,9 @@ function PurchaseOrderBillModal({
   onUseInBillEntry,
   onSyncCosts,
   syncingCosts = false,
+  onOpenPrinterModal,
+  isBtConnected = false,
+  btName = null,
 }: {
   po: PurchaseOrder;
   currency: string;
@@ -1396,9 +1471,77 @@ function PurchaseOrderBillModal({
   onUseInBillEntry?: () => void;
   onSyncCosts?: () => void;
   syncingCosts?: boolean;
+  onOpenPrinterModal?: () => void;
+  isBtConnected?: boolean;
+  btName?: string | null;
 }) {
-  const handleDownloadPdf = () => {
+  const handleDownloadNormalPdf = () => {
     generatePoPdf({ po, business, branch, currency });
+  };
+
+  const handleDownload58ThermalPdf = () => {
+    generatePoThermalPdf({ po, business, branch, currency, paperWidth: '58mm' });
+  };
+
+  const handleDirect58Print = async () => {
+    const status = getPrinterStatus();
+    if (status.isConnected) {
+      await printPoViaBluetooth({ po, business, branch, currency });
+    } else {
+      // Direct 1-Click Browser Print (58mm) without file download
+      const dateStr = po.createdAt?.toDate 
+        ? format(po.createdAt.toDate(), 'dd/MM/yyyy hh:mm a') 
+        : format(new Date(), 'dd/MM/yyyy hh:mm a');
+
+      const itemsHtml = (po.items || []).map((item, idx) => {
+        const isPack = item.orderMode === 'pack' && item.packCount;
+        const packTxt = isPack && item.piecesPerPack ? `<br><small style="color:#333">[${item.packCount} Pk x ${item.piecesPerPack} pcs = ${item.quantity} pcs]</small>` : '';
+        const bcTxt = item.barcode ? `<br><small style="color:#555">BC: ${item.barcode}</small>` : '';
+        const qtyStr = isPack ? `${item.packCount} Pk` : `${item.quantity || 1} pcs`;
+        const rateStr = isPack && item.packPrice ? `@${formatAmount(item.packPrice, currency)}` : `@${formatAmount(item.unitPrice, currency)}`;
+        const totalStr = formatAmount(item.totalPrice || ((Number(item.quantity) || 1) * (Number(item.unitPrice) || 0)), currency);
+        return `
+          <div class="item-row">
+            <div class="item-name">${idx + 1}. ${item.name || 'Item'}${packTxt}${bcTxt}</div>
+            <div class="item-meta">
+              <span>${qtyStr} ${rateStr}</span>
+              <span class="bold">${totalStr}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      const totalQty = (po.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+
+      const htmlBody = `
+        <div class="center title">${business?.name || 'SHOMEDESK POS'}</div>
+        ${branch ? `<div class="center subtitle">Branch: ${branch.name}</div>` : ''}
+        ${business?.mobileNumber ? `<div class="center subtitle">Tel: ${business.mobileNumber}</div>` : ''}
+        <div class="divider"></div>
+        <div class="center bold" style="font-size:11px;">PURCHASE ORDER SLIP</div>
+        <div class="center bold">PO #: ${po.poNumber || 'N/A'}</div>
+        <div class="center subtitle">Date: ${dateStr}</div>
+        <div class="divider"></div>
+        <div class="row"><span class="bold">Supplier:</span><span>${po.supplierName || 'Unknown'}</span></div>
+        ${po.supplierPhone ? `<div class="row"><span>Phone:</span><span>${po.supplierPhone}</span></div>` : ''}
+        <div class="divider-solid"></div>
+        <div class="row bold"><span>Item</span><span>Qty / Total (${currency})</span></div>
+        <div class="divider"></div>
+        ${itemsHtml}
+        <div class="divider-solid"></div>
+        <div class="row"><span>Total Items (${po.items?.length || 0}):</span><span class="bold">${totalQty} units</span></div>
+        <div class="row total-box"><span>GRAND TOTAL:</span><span>${currency} ${formatAmount(po.totalAmount || 0, currency)}</span></div>
+        ${po.notes ? `<div class="divider"></div><div style="font-size:8.5px;">Notes: ${po.notes}</div>` : ''}
+        <div class="divider"></div>
+        <div class="center" style="font-size:8px; margin-top:4px;">*** END OF ORDER ***</div>
+        <div class="center subtitle">${format(new Date(), 'dd/MM/yyyy HH:mm:ss')}</div>
+      `;
+
+      directPrint58mmHtml({
+        title: `PO_${po.poNumber || 'Order'}`,
+        htmlBody,
+      });
+    }
   };
 
   const createdDate = po.createdAt?.toDate
@@ -1424,24 +1567,24 @@ function PurchaseOrderBillModal({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {onSyncCosts && (
               <button
                 type="button"
                 onClick={onSyncCosts}
                 disabled={syncingCosts}
-                className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2.5 px-3.5 rounded-xl shadow cursor-pointer transition-all active:scale-95 disabled:opacity-50"
+                className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2.5 px-3 rounded-xl shadow cursor-pointer transition-all active:scale-95 disabled:opacity-50"
                 title="Sync all item per-piece costs into SalesPlay POS"
               >
                 <RefreshCw size={14} className={syncingCosts ? "animate-spin" : ""} />
-                <span>Sync Costs to SalesPlay</span>
+                <span>Sync Costs</span>
               </button>
             )}
             {onEdit && (
               <button
                 type="button"
                 onClick={onEdit}
-                className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold py-2.5 px-3.5 rounded-xl shadow cursor-pointer transition-all active:scale-95"
+                className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold py-2.5 px-3 rounded-xl shadow cursor-pointer transition-all active:scale-95"
               >
                 <Edit3 size={14} /> Edit PO
               </button>
@@ -1450,27 +1593,69 @@ function PurchaseOrderBillModal({
               <button
                 type="button"
                 onClick={onUseInBillEntry}
-                className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-2.5 px-3.5 rounded-xl shadow cursor-pointer transition-all active:scale-95"
+                className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-2.5 px-3 rounded-xl shadow cursor-pointer transition-all active:scale-95"
               >
                 <ArrowRight size={14} /> Log as Bill
               </button>
             )}
+
+            {/* 1. Direct Print (58mm) - Wireless Bluetooth or 1-Click Direct Print */}
             <button
               type="button"
-              onClick={handleDownloadPdf}
-              className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black py-2.5 px-4 rounded-xl shadow-lg shadow-emerald-900/30 transition-all cursor-pointer active:scale-95"
-              title="Download vector PDF file"
+              onClick={handleDirect58Print}
+              className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black py-2.5 px-3 rounded-xl shadow-lg shadow-emerald-900/30 transition-all cursor-pointer active:scale-95"
+              title={isBtConnected ? "Direct wireless print to 58mm Bluetooth printer" : "Direct 1-click 58mm print (no download)"}
             >
-              <Download size={16} />
-              <span>Download PDF</span>
+              <Printer size={15} />
+              <span>{isBtConnected ? 'BT Print (58mm)' : 'Direct Print (58mm)'}</span>
             </button>
+
+            {/* 2. Download 58mm Roll PDF */}
+            <button
+              type="button"
+              onClick={handleDownload58ThermalPdf}
+              className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold py-2.5 px-3 rounded-xl shadow-lg shadow-amber-950/40 transition-all cursor-pointer active:scale-95"
+              title="Download 58mm thermal roll vector PDF"
+            >
+              <Download size={14} />
+              <span>58mm PDF</span>
+            </button>
+
+            {/* 3. Normal A4 Vector PDF */}
+            <button
+              type="button"
+              onClick={handleDownloadNormalPdf}
+              className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2.5 px-3 rounded-xl shadow-lg shadow-indigo-950/40 transition-all cursor-pointer active:scale-95"
+              title="Download standard A4 vector Purchase Order PDF"
+            >
+              <Download size={14} />
+              <span>A4 PDF</span>
+            </button>
+
+            {/* 4. Bluetooth Setup / Connect Button */}
+            {onOpenPrinterModal && (
+              <button
+                type="button"
+                onClick={onOpenPrinterModal}
+                className={cn(
+                  "flex items-center gap-1 px-2.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer border active:scale-95",
+                  isBtConnected
+                    ? "bg-emerald-600/20 text-emerald-300 border-emerald-500/40"
+                    : "bg-slate-800 text-blue-400 border-slate-700 hover:bg-slate-700"
+                )}
+                title="Connect or configure 58mm Bluetooth printer"
+              >
+                <Bluetooth size={14} className={isBtConnected ? "text-emerald-400" : ""} />
+                <span className="hidden sm:inline">{isBtConnected ? '58mm Paired' : 'Pair BT'}</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={onClose}
-              className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5"
+              className="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ml-1"
             >
               <X size={16} />
-              <span>Close</span>
             </button>
           </div>
         </div>

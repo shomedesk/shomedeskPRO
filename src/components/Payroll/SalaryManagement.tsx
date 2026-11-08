@@ -319,10 +319,11 @@ export const SalaryManagement: React.FC = () => {
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={printStatement}
-                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-900/20"
+                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-900/20 cursor-pointer active:scale-95"
+                title="Download statement as PDF file"
               >
-                <Printer size={12} />
-                Print Statement
+                <Download size={12} />
+                Download PDF
               </button>
               <select
                 value={statementFilter.employeeId}
@@ -791,9 +792,11 @@ export const SalaryManagement: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <button
                     onClick={printSlip}
-                    className="p-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all"
+                    className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all text-xs font-black cursor-pointer active:scale-95"
+                    title="Download Salary Slip PDF"
                   >
-                    <Printer size={20} />
+                    <Download size={18} />
+                    <span>Download PDF</span>
                   </button>
                   <button onClick={() => setViewingSlip(null)} className="text-slate-400 hover:text-slate-600">
                     <X size={24} />

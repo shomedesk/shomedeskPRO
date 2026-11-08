@@ -29,7 +29,8 @@ import {
   Calculator,
   Globe,
   ShoppingBag,
-  RefreshCw
+  RefreshCw,
+  Bluetooth
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { auth } from '@/src/lib/firebase';
@@ -39,6 +40,8 @@ import { useBusiness } from '@/src/contexts/BusinessContext';
 import NotificationCenter from './NotificationCenter';
 import CurrencyTicker from './CurrencyTicker';
 import BusinessAssistant from './BusinessAssistant';
+import { BluetoothPrinterModal } from './BluetoothPrinterModal';
+import { subscribePrinterState } from '@/src/lib/bluetoothPrinter';
 
 export default function Layout() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(typeof window !== 'undefined' ? window.innerWidth >= 1024 : false);
@@ -60,6 +63,18 @@ export default function Layout() {
     userProfile 
   } = useBusiness();
   const navigate = useNavigate();
+
+  const [isPrinterModalOpen, setIsPrinterModalOpen] = useState(false);
+  const [isBtConnected, setIsBtConnected] = useState(false);
+  const [btName, setBtName] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unsub = subscribePrinterState((conn, name) => {
+      setIsBtConnected(conn);
+      setBtName(name);
+    });
+    return unsub;
+  }, []);
 
   const handleQuickSync = async () => {
     const toastId = toast.loading('Syncing latest items & sales from SalesPlay POS...');
@@ -357,6 +372,23 @@ export default function Layout() {
                 <RefreshCw size={13} className={cn(isSyncingSalesPlay && "animate-spin")} />
                 <span className="hidden sm:inline">{isSyncingSalesPlay ? 'Syncing...' : 'Sync POS'}</span>
               </button>
+
+              {/* 58mm Bluetooth Printer Quick Connect / Status */}
+              <button
+                type="button"
+                onClick={() => setIsPrinterModalOpen(true)}
+                className={cn(
+                  "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer shadow-sm border",
+                  isBtConnected
+                    ? "bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                    : "bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border-blue-500/30"
+                )}
+                title="Connect or configure 58mm Bluetooth thermal POS printer"
+              >
+                <Bluetooth size={13} className={isBtConnected ? "text-emerald-400" : ""} />
+                <span className="hidden sm:inline">{isBtConnected ? `58mm: ${btName || 'Online'}` : '58mm Printer'}</span>
+              </button>
+
               <NotificationCenter />
               <div className="h-6 md:h-8 w-px bg-slate-800" />
               <div className="flex items-center gap-2 md:gap-3">
@@ -377,6 +409,7 @@ export default function Layout() {
             </div>
           </div>
           <BusinessAssistant />
+          <BluetoothPrinterModal isOpen={isPrinterModalOpen} onClose={() => setIsPrinterModalOpen(false)} />
         </main>
     </div>
   </div>

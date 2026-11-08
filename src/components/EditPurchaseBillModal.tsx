@@ -343,26 +343,7 @@ export function EditPurchaseBillModal({
             spUpdatedCount = spRes.updatedCount;
           }
 
-          // B. Cost updates (per-piece retail cost in SalesPlay, e.g. 1 pack 24 pcs @ 1.000 OMR = 0.042 OMR/piece)
-          if (items.length > 0) {
-            const costUpdates = items.map(i => {
-              const perPieceCost = i.orderMode === 'pack' && i.piecesPerPack && i.packPrice
-                ? Math.round(((Number(i.packPrice) || 0) / Math.max(1, Number(i.piecesPerPack))) * 1000) / 1000
-                : (Number(i.unitPrice) || 0);
-              return {
-                productId: resolveSalesPlayId(i) || undefined,
-                productCode: i.productCode,
-                barcode: i.barcode,
-                name: i.name,
-                unitCost: perPieceCost,
-                salesPrice: Number(i.salesPrice) || 0,
-                shopId: mappedShop,
-              };
-            });
-            const costRes = await updateSalesPlayProductCosts(costUpdates, spSettings.apiToken, mappedShop);
-            spCostUpdatedCount = costRes.updatedCount;
-            if (costRes.success) spSyncSuccess = true;
-          }
+          // B. Note: SalesPlay product costs are preserved as requested by the user. Only stock quantities are adjusted.
         } catch (spErr) {
           console.warn('SalesPlay edit sync notice:', spErr);
         }

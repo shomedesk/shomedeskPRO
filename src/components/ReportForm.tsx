@@ -2589,15 +2589,14 @@ export default function ReportForm() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  {/* Print / Save PDF in Header */}
+                  {/* Download PDF in Header */}
                   <button 
                     onClick={() => handlePrintReport(selectedReport)}
-                    className="p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-xl transition-all flex items-center gap-1.5 text-xs font-black uppercase tracking-wider"
-                    title="Print / Save as PDF"
+                    className="p-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-xl transition-all flex items-center gap-1.5 text-xs font-black uppercase tracking-wider cursor-pointer active:scale-95"
+                    title="Download vector PDF report"
                   >
-                    <Printer size={16} />
-                    <Download size={14} />
-                    <span>Print / PDF</span>
+                    <Download size={15} />
+                    <span>Download PDF</span>
                   </button>
 
                   {/* Admin actions in Modal */}
@@ -2783,10 +2782,10 @@ export default function ReportForm() {
               <div className="p-6 border-t border-slate-800 bg-slate-900/50 flex gap-3">
                 <button
                   onClick={() => handlePrintReport(selectedReport)}
-                  className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-4 rounded-2xl font-black transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20"
+                  className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-4 rounded-2xl font-black transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20 cursor-pointer active:scale-95"
                 >
-                  <Printer size={18} />
-                  Print / Download PDF
+                  <Download size={18} />
+                  Download PDF
                 </button>
                 <button
                   onClick={() => setSelectedReport(null)}

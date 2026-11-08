@@ -1,10 +1,11 @@
 import React from 'react';
 import { PurchaseLog, Business, Branch, Supplier } from '@/src/types';
 import { format } from 'date-fns';
-import { X, ShoppingCart, CheckCircle2, Download } from 'lucide-react';
+import { X, ShoppingCart, CheckCircle2, Download, Printer } from 'lucide-react';
 import { Barcode } from './Barcode';
 import { formatAmount } from '@/src/lib/currencyUtils';
 import { generateBillPdf } from '@/src/lib/pdfUtils';
+import { directPrint58mmHtml } from '@/src/lib/bluetoothPrinter';
 
 interface BillReceiptModalProps {
   log: PurchaseLog | null;
@@ -36,6 +37,53 @@ export function BillReceiptModal({
   const netDue = Number(log.netDue ?? (openingDue + billAmount - paidAmount));
   const paymentModeLabel = log.paymentMode || log.paymentType || 'CASH';
 
+  const handleDirect58Print = () => {
+    const itemsHtml = (log.items || []).map((item, idx) => {
+      const isPack = item.orderMode === 'pack' && item.packCount;
+      const packTxt = isPack && item.piecesPerPack ? `<br><small style="color:#333">[${item.packCount} Pk x ${item.piecesPerPack} pcs = ${item.quantity} pcs]</small>` : '';
+      const bcTxt = item.barcode ? `<br><small style="color:#555">BC: ${item.barcode}</small>` : '';
+      const qtyStr = isPack ? `${item.packCount} Pk` : `${item.quantity || 1} pcs`;
+      const rateStr = isPack && item.packPrice ? `@${formatAmount(item.packPrice, currency)}` : `@${formatAmount(item.unitPrice, currency)}`;
+      const totalStr = formatAmount(item.totalPrice || ((Number(item.quantity) || 1) * (Number(item.unitPrice) || 0)), currency);
+      return `
+        <div class="item-row">
+          <div class="item-name">${idx + 1}. ${item.name || 'Item'}${packTxt}${bcTxt}</div>
+          <div class="item-meta">
+            <span>${qtyStr} ${rateStr}</span>
+            <span class="bold">${totalStr}</span>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    const htmlBody = `
+      <div class="center title">${business?.name || 'SHOMEDESK POS'}</div>
+      ${branch ? `<div class="center subtitle">Branch: ${branch.name}</div>` : ''}
+      <div class="divider"></div>
+      <div class="center bold" style="font-size:11px;">PURCHASE BILL RECEIPT</div>
+      <div class="center bold">INV #: ${log.invoiceNumber || 'N/A'}</div>
+      <div class="center subtitle">Date: ${invoiceDate}</div>
+      <div class="divider"></div>
+      <div class="row"><span class="bold">Supplier:</span><span>${log.supplierName || 'Unknown'}</span></div>
+      <div class="row"><span>Payment:</span><span class="bold">${paymentModeLabel}</span></div>
+      <div class="divider-solid"></div>
+      <div class="row bold"><span>Item</span><span>Qty / Total (${currency})</span></div>
+      <div class="divider"></div>
+      ${itemsHtml}
+      <div class="divider-solid"></div>
+      <div class="row"><span>Bill Amount:</span><span class="bold">${currency} ${formatAmount(billAmount, currency)}</span></div>
+      <div class="row"><span>Paid Amount:</span><span class="bold">${currency} ${formatAmount(paidAmount, currency)}</span></div>
+      <div class="row total-box"><span>NET DUE:</span><span>${currency} ${formatAmount(netDue, currency)}</span></div>
+      <div class="divider"></div>
+      <div class="center" style="font-size:8px; margin-top:4px;">*** END OF RECEIPT ***</div>
+    `;
+
+    directPrint58mmHtml({
+      title: `Bill_${log.invoiceNumber || 'Receipt'}`,
+      htmlBody,
+    });
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
       <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-3xl overflow-hidden shadow-2xl my-8 flex flex-col">
@@ -46,6 +94,15 @@ export function BillReceiptModal({
             <h3 className="text-sm font-black uppercase tracking-wider">Purchase Bill Receipt</h3>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleDirect58Print}
+              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-black py-2.5 px-3.5 rounded-xl shadow-lg shadow-blue-900/30 transition-all cursor-pointer active:scale-95"
+              title="1-Click direct print to 58mm POS thermal printer"
+            >
+              <Printer size={15} />
+              <span>Direct Print (58mm)</span>
+            </button>
             <button
               type="button"
               onClick={handleDownloadPdf}

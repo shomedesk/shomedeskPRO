@@ -547,11 +547,11 @@ export async function updateSalesPlayProductCosts(
 
   const validItems = itemsToUpdate.filter(i => {
     const cost = Number(i.unitCost);
-    return !isNaN(cost) && cost >= 0 && (i.productId || i.productCode || i.barcode || (i.name && i.name.trim().length > 0));
+    return !isNaN(cost) && cost > 0 && (i.productId || i.productCode || i.barcode || (i.name && i.name.trim().length > 0));
   });
 
   if (validItems.length === 0) {
-    return { success: true, message: 'No items with valid costs to update', updatedCount: 0 };
+    return { success: true, message: 'No items with valid positive costs to update (existing costs preserved)', updatedCount: 0 };
   }
 
   try {
@@ -583,6 +583,11 @@ export async function updateSalesPlayProductCosts(
       let postPayload: any = null;
 
       if (matched) {
+        // SAFEGUARD: Never overwrite existing cost in SalesPlay with 0.000 or invalid cost.
+        // Whatever cost is already in SalesPlay must remain strictly preserved.
+        const existingCost = Number(matched.cost) || 0;
+        const finalCost = perPieceCost > 0 ? perPieceCost : existingCost;
+
         let shops = Array.isArray(matched.shops) ? matched.shops.map((s: any) => {
           let price = Number(s.price) || 0;
           if (s.shop_id === targetShop && item.salesPrice !== undefined && Number(item.salesPrice) > 0) {
@@ -623,7 +628,7 @@ export async function updateSalesPlayProductCosts(
           is_ingredient: Boolean(matched.is_ingredient ?? false),
           is_vat_product: Boolean(matched.is_vat_product ?? false),
           is_variant: Boolean(matched.is_variant ?? false),
-          cost: perPieceCost,
+          cost: finalCost > 0 ? finalCost : existingCost,
           shops,
         };
       } else if (cleanName) {
@@ -738,13 +743,14 @@ export interface BillSyncItem {
 
 /**
  * Synchronizes a Purchase Bill to SalesPlay POS:
- * 1. Updates per-piece retail cost in SalesPlay (POST /products).
- * 2. Increments live inventory stock (POST /inventory).
+ * 1. Increments live inventory stock (POST /inventory).
+ * 2. Strictly preserves existing product costs in SalesPlay (does NOT overwrite or reset to 0.000).
  */
 export async function syncBillToSalesPlay(
   shopId: string,
   items: BillSyncItem[],
-  token?: string
+  token?: string,
+  options?: { updateCosts?: boolean }
 ): Promise<{
   success: boolean;
   stockUpdatedCount: number;
@@ -754,20 +760,28 @@ export async function syncBillToSalesPlay(
   const authToken = token || DEFAULT_SALESPLAY_CONFIG.apiToken;
   const targetShop = shopId || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
 
-  // 1. Update retail product costs in SalesPlay (per-piece retail cost)
-  const costResult = await updateSalesPlayProductCosts(
-    items.map(i => ({
-      productId: i.productId,
-      productCode: i.productCode,
-      barcode: i.barcode,
-      name: i.name,
-      unitCost: i.unitCost,
-      salesPrice: i.salesPrice,
-      shopId: targetShop,
-    })),
-    authToken,
-    targetShop
-  );
+  // IMPORTANT: When entering a Purchase Bill or Purchase Order,
+  // existing SalesPlay product costs MUST NOT change or become 0.000.
+  // Existing costs in SalesPlay must remain untouched.
+  // Therefore, cost updates are strictly disabled by default.
+  let costResult = { success: true, updatedCount: 0, message: 'Existing product costs preserved in SalesPlay' };
+  if (options?.updateCosts) {
+    costResult = await updateSalesPlayProductCosts(
+      items
+        .filter(i => Number(i.unitCost) > 0)
+        .map(i => ({
+          productId: i.productId,
+          productCode: i.productCode,
+          barcode: i.barcode,
+          name: i.name,
+          unitCost: i.unitCost,
+          salesPrice: i.salesPrice,
+          shopId: targetShop,
+        })),
+      authToken,
+      targetShop
+    );
+  }
 
   // 2. Resolve product IDs for inventory stock update
   let resolvedInventoryItems: { productId: string; quantityToAdd: number }[] = [];
@@ -812,12 +826,12 @@ export async function syncBillToSalesPlay(
     stockSuccess = invResult.success;
   }
 
-  const overallSuccess = costResult.success || stockSuccess;
+  const overallSuccess = stockSuccess || costResult.success;
   return {
     success: overallSuccess,
     stockUpdatedCount,
     costUpdatedCount: costResult.updatedCount,
-    message: `SalesPlay POS: Stock (+${stockUpdatedCount} items) & Cost (${costResult.updatedCount} items) updated`,
+    message: `SalesPlay POS: Stock (+${stockUpdatedCount} items) updated (item costs preserved)`,
   };
 }
 
