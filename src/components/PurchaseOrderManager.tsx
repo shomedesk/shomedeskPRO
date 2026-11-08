@@ -255,8 +255,10 @@ export function PurchaseOrderManager({
   const handleCancelEdit = () => {
     setEditingPoId(null);
     setItems([]);
-    setPoNumber(getNextShortPoNumber(purchaseOrders));
+    setSupplierId('');
     setNotes('');
+    setExpectedDate('');
+    setPoNumber(getNextShortPoNumber(purchaseOrders));
     setIsCreating(false);
   };
 
@@ -267,13 +269,17 @@ export function PurchaseOrderManager({
   // Helper to calculate next clean short PO number (PO-001, PO-002, PO-003...)
   const getNextShortPoNumber = (orders: PurchaseOrder[]): string => {
     let maxNum = 0;
-    orders.forEach((p) => {
+    (orders || []).forEach((p) => {
       if (p.poNumber) {
-        // Match numbers like PO-001, PO-1, PO-002 (ignore old timestamp style numbers)
-        const match = p.poNumber.match(/^PO-0*([1-9]\d{0,4})$/);
+        const clean = String(p.poNumber).trim();
+        // Match numbers like PO-001, PO-1, PO 002, PO-010, PO-123
+        const match = clean.match(/(?:PO|po)[-\s]*0*(\d+)/);
         if (match) {
           const num = parseInt(match[1], 10);
-          if (num > maxNum) maxNum = num;
+          // Ignore timestamp/date style numbers (> 99999) and find the maximum sequential number
+          if (!isNaN(num) && num < 100000 && num > maxNum) {
+            maxNum = num;
+          }
         }
       }
     });
@@ -281,12 +287,12 @@ export function PurchaseOrderManager({
     return `PO-${String(nextNum).padStart(3, '0')}`;
   };
 
-  // Initial PO Number generation - Short professional sequence (PO-001, PO-002...)
+  // Dynamic PO Number generation - Always updates when orders list loads/changes (unless currently editing an existing PO)
   useEffect(() => {
-    if (!poNumber || poNumber.startsWith('PO-202')) {
+    if (!editingPoId) {
       setPoNumber(getNextShortPoNumber(purchaseOrders));
     }
-  }, [purchaseOrders]);
+  }, [purchaseOrders, editingPoId]);
 
   // Load SalesPlay Products for rapid autocomplete & scanning
   useEffect(() => {
@@ -725,8 +731,14 @@ export function PurchaseOrderManager({
       // Immediately open printable PO Bill modal for the newly generated order!
       setViewingPO({ id: docRef.id, ...payload } as any);
 
-      // Reset form
-      handleCancelEdit();
+      // Reset form and advance to next sequence number
+      setEditingPoId(null);
+      setItems([]);
+      setSupplierId('');
+      setNotes('');
+      setExpectedDate('');
+      setIsCreating(false);
+      setPoNumber(getNextShortPoNumber([...purchaseOrders, { poNumber } as any]));
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'purchaseOrders');
       toast.error(editingPoId ? 'Failed to update purchase order' : 'Failed to create purchase order');
@@ -764,7 +776,13 @@ export function PurchaseOrderManager({
 
         <button
           type="button"
-          onClick={() => setIsCreating(!isCreating)}
+          onClick={() => {
+            if (!isCreating) {
+              setEditingPoId(null);
+              setPoNumber(getNextShortPoNumber(purchaseOrders));
+            }
+            setIsCreating(!isCreating);
+          }}
           className="flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 px-5 rounded-2xl shadow-lg transition-all cursor-pointer active:scale-95 text-xs"
         >
           {isCreating ? <X size={16} /> : <Plus size={16} />}

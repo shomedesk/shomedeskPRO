@@ -55,6 +55,7 @@ export default defineConfig(({ mode, command }) => {
         workbox: {
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024, // 6 MB to support PDF & report generation libraries
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          navigateFallbackDenylist: [/^\/api/],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,

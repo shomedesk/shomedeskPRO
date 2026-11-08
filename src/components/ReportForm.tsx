@@ -19,7 +19,8 @@ import {
   getSalesPlaySettings, 
   saveSalesPlaySettings,
   getCachedDailySalesSummary,
-  saveCachedDailySalesSummary
+  saveCachedDailySalesSummary,
+  getCloudDailySalesSummary
 } from '@/src/services/salesplay';
 import { generateDailyReportPdf } from '@/src/lib/pdfUtils';
 
@@ -223,10 +224,70 @@ export default function ReportForm() {
           `Imported ${res.importedCount} receipts for ${label} (${targetDateStr})! Total: ${currency} ${formatAmount(res.totalSales, currency)} | COGS: ${currency} ${formatAmount(res.totalCogs, currency)} | Gross Profit: ${currency} ${formatAmount(res.grossProfit, currency)} (Preserved on refresh & Cloud Saved)`,
           { id: toastId, duration: 6000 }
         );
-      } else if (cachedSummary) {
-        toast.success(`Loaded ${label}'s sales from persistent cache!`, { id: toastId });
       } else {
-        toast.info(res.message || `No sales found in SalesPlay for ${label} (${targetDateStr}).`, { id: toastId });
+        // Fallback 1: Check Firestore cloud daily summary (works across all launched devices)
+        const cloudSummary = await getCloudDailySalesSummary(selectedBusiness.id, targetDateStr);
+        if (cloudSummary && (cloudSummary.importedCount > 0 || cloudSummary.totalSales > 0)) {
+          setFormData(prev => ({
+            ...prev,
+            cashSale: cloudSummary.cashTotal || 0,
+            onlineSale: cloudSummary.onlineTotal || 0,
+            cardSale: cloudSummary.cardTotal || 0,
+            bankSale: toStrictDecimal3((cloudSummary.cardTotal || 0) + (cloudSummary.onlineTotal || 0)),
+            cogs: cloudSummary.totalCogs || cloudSummary.cogs || 0,
+          }));
+          saveCachedDailySalesSummary(selectedBusiness.id, targetDateStr, cloudSummary);
+          toast.success(
+            `Loaded ${cloudSummary.importedCount || 'all'} sales for ${label} (${targetDateStr}) from Cloud Database! Total: ${currency} ${formatAmount(cloudSummary.totalSales, currency)}`,
+            { id: toastId }
+          );
+          return;
+        }
+
+        // Fallback 2: Check Firestore 'sales' collection directly
+        try {
+          const salesSnap = await getDocs(query(
+            collection(db, 'sales'),
+            where('businessId', '==', selectedBusiness.id)
+          ));
+          let fsSales = 0, fsCogs = 0, fsCash = 0, fsCard = 0, fsOnline = 0, count = 0;
+          salesSnap.forEach(d => {
+            const inv = d.data();
+            const invDate = inv.receiptDate || (inv.date ? inv.date.substring(0, 10) : '');
+            if (invDate === targetDateStr) {
+              count++;
+              fsSales += Number(inv.totalAmount) || 0;
+              fsCogs += Number(inv.totalCost) || 0;
+              fsCash += Number(inv.cashAmount) || 0;
+              fsCard += Number(inv.cardAmount) || 0;
+              fsOnline += Number(inv.onlineAmount) || 0;
+            }
+          });
+
+          if (count > 0) {
+            setFormData(prev => ({
+              ...prev,
+              cashSale: toStrictDecimal3(fsCash),
+              onlineSale: toStrictDecimal3(fsOnline),
+              cardSale: toStrictDecimal3(fsCard),
+              bankSale: toStrictDecimal3(fsCard + fsOnline),
+              cogs: toStrictDecimal3(fsCogs),
+            }));
+            toast.success(
+              `Loaded ${count} sales receipts for ${label} (${targetDateStr}) from Cloud Database! Total: ${currency} ${formatAmount(fsSales, currency)}`,
+              { id: toastId }
+            );
+            return;
+          }
+        } catch (fsErr) {
+          console.warn('Direct Firestore sales lookup notice:', fsErr);
+        }
+
+        if (cachedSummary) {
+          toast.success(`Loaded ${label}'s sales from persistent cache!`, { id: toastId });
+        } else {
+          toast.info(res.message || `No sales found in SalesPlay for ${label} (${targetDateStr}).`, { id: toastId });
+        }
       }
     } catch (err: any) {
       if (cachedSummary) {

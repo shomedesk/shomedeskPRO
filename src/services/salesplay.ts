@@ -32,14 +32,13 @@ async function safeFetchSalesPlayJson<T>(
 
   // Candidate URLs in priority order:
   // 1. Same-origin reverse proxy (/api/salesplay) - handles CORS, pagination, and auth
-  // 2. Cloud Run Applet backend endpoints (for standalone webapp on external origins)
+  // 2. Explicit window.location.origin reverse proxy
   // 3. Direct SalesPlay API endpoint
   const candidateUrls: string[] = [
     `/api/salesplay${cleanPath}`,
-    `https://ais-pre-qqunexm2wvpnenivdg53h4-416302796444.asia-east1.run.app/api/salesplay${cleanPath}`,
-    `https://ais-dev-qqunexm2wvpnenivdg53h4-416302796444.asia-east1.run.app/api/salesplay${cleanPath}`,
+    typeof window !== 'undefined' && window.location?.origin ? `${window.location.origin}/api/salesplay${cleanPath}` : '',
     `${SALESPLAY_API_BASE}${cleanPath}`,
-  ];
+  ].filter(Boolean);
 
   const mergedHeaders: Record<string, string> = {
     'Accept': '*/*',
@@ -1243,6 +1242,18 @@ export function saveCachedDailySalesSummary(businessId: string, dateStr: string,
   } catch {}
 }
 
+export async function getCloudDailySalesSummary(businessId: string, dateStr: string): Promise<any | null> {
+  try {
+    const snap = await getDoc(doc(db, 'salesDailySummaries', `${businessId}_${dateStr}`));
+    if (snap.exists()) {
+      return snap.data();
+    }
+  } catch (err) {
+    console.warn('Could not read cloud daily sales summary:', err);
+  }
+  return null;
+}
+
 /**
  * Synchronize SalesPlay sales receipts into local cache and Firestore
  * With smart deduplication to preserve free-tier Firestore write quota.
@@ -1503,11 +1514,24 @@ export async function syncSalesPlaySalesToFirestore({
 
   // 2. Persist daily summaries in localStorage for instant 1-click restoration in ReportForm
   for (const [dStr, sum] of Object.entries(dailySummaryMap)) {
-    saveCachedDailySalesSummary(businessId, dStr, {
+    const summaryData = {
       ...sum,
       bankSale: toStrictDecimal3(sum.cardTotal + sum.onlineTotal),
       grossProfit: toStrictDecimal3(sum.totalSales - sum.totalCogs),
-    });
+    };
+    saveCachedDailySalesSummary(businessId, dStr, summaryData);
+
+    // Also persist daily summaries in Firestore so ANY device / launched webapp has the exact totals
+    try {
+      await setDoc(doc(db, 'salesDailySummaries', `${businessId}_${dStr}`), {
+        businessId,
+        date: dStr,
+        ...summaryData,
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+    } catch (fsSummaryErr) {
+      console.warn('Notice saving cloud daily sales summary:', fsSummaryErr);
+    }
   }
 
   const grossProfit = totalSales - totalCogs;
