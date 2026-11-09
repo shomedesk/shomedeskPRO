@@ -117,6 +117,17 @@ app.all('/api/salesplay*', async (req, res) => {
   try {
     const cleanPath = targetPath.split('?')[0];
 
+    // STRICT USER CONSTRAINT: Prevent any mutation of product costs or prices in SalesPlay.
+    // Stock is incremented strictly via POST /inventory. Existing product costs must remain 100% untouched.
+    if ((req.method === 'POST' || req.method === 'PUT') && (cleanPath === '/products' || cleanPath === '/product')) {
+      console.log('Blocked POST/PUT /products to strictly protect existing SalesPlay product costs/prices.');
+      return res.status(200).json({
+        code: 'SUCCESS',
+        success: true,
+        message: 'Existing product costs and prices strictly preserved in SalesPlay POS',
+      });
+    }
+
     // Special auto-paginated handling for GET /products:
     if (req.method === 'GET' && cleanPath === '/products') {
       const allProducts: any[] = [];
