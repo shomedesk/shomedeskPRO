@@ -28,7 +28,7 @@ export default defineConfig(({ mode, command }) => {
           theme_color: '#0F172A',
           background_color: '#0F172A',
           display: 'standalone',
-          orientation: 'portrait',
+          orientation: 'any',
           start_url: '/',
           scope: '/',
           icons: [
