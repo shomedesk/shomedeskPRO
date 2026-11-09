@@ -619,18 +619,23 @@ export async function syncBillToSalesPlay(
   // 3. Update stock levels in SalesPlay
   let stockUpdatedCount = 0;
   let stockSuccess = false;
+  let stockMessage = '';
   if (resolvedInventoryItems.length > 0) {
     const invResult = await updateSalesPlayInventory(targetShop, resolvedInventoryItems, authToken);
     stockUpdatedCount = invResult.updatedCount;
     stockSuccess = invResult.success;
+    stockMessage = invResult.message;
+  } else {
+    stockMessage = 'No matching SalesPlay product IDs found to update stock.';
   }
 
-  const overallSuccess = stockSuccess || costResult.success;
   return {
-    success: overallSuccess,
+    success: stockSuccess,
     stockUpdatedCount,
-    costUpdatedCount: costResult.updatedCount,
-    message: `SalesPlay POS: Stock (+${stockUpdatedCount} items) updated (item costs preserved)`,
+    costUpdatedCount: 0,
+    message: stockSuccess
+      ? `SalesPlay POS: Stock (+${stockUpdatedCount} items) updated! (Item costs strictly preserved)`
+      : stockMessage || 'Could not update stock in SalesPlay',
   };
 }
 

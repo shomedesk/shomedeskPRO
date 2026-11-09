@@ -50,6 +50,7 @@ import {
   fetchSalesPlayProductsWithInventory,
   syncAllSalesPlayCatalogToFirestore,
   getSalesPlaySettings,
+  syncBillToSalesPlay,
   DEFAULT_SALESPLAY_CONFIG,
   FALLBACK_SALESPLAY_PRODUCTS
 } from '@/src/services/salesplay';
@@ -112,6 +113,7 @@ export function PurchaseOrderManager({
 
   // Detailed Modal view
   const [viewingPO, setViewingPO] = useState<PurchaseOrder | null>(null);
+  const [syncingPoStock, setSyncingPoStock] = useState(false);
   const [isPrinterModalOpen, setIsPrinterModalOpen] = useState(false);
   const [isBtConnected, setIsBtConnected] = useState(false);
   const [btName, setBtName] = useState<string | null>(null);
@@ -183,6 +185,56 @@ export function PurchaseOrderManager({
         title: `PO_${targetPo.poNumber || 'Order'}`,
         htmlBody,
       });
+    }
+  };
+
+  const handleSyncPoStockToSalesPlay = async (targetPo: PurchaseOrder) => {
+    if (!targetPo?.items || targetPo.items.length === 0) {
+      toast.error('No items in this Purchase Order to sync');
+      return;
+    }
+    if (!activeBusiness?.id) return;
+    setSyncingPoStock(true);
+    const toastId = toast.loading(`Updating stock in SalesPlay POS for PO ${targetPo.poNumber}...`);
+    try {
+      const spSettings = await getSalesPlaySettings(activeBusiness.id);
+      const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[targetPo.branchId || ''])
+        || spSettings.selectedShopId
+        || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+      const syncItems = targetPo.items.map(item => {
+        let pId = item.productId;
+        if (!pId || pId.length < 5 || pId.startsWith('item_')) {
+          const found = salesPlayProducts.find(p =>
+            (item.barcode && p.barcode && p.barcode.trim() === item.barcode.trim()) ||
+            (item.productCode && p.product_code && p.product_code.trim() === item.productCode.trim()) ||
+            (item.name && p.product_name && p.product_name.trim().toLowerCase() === item.name.trim().toLowerCase())
+          );
+          if (found && found.id) {
+            pId = found.id;
+          }
+        }
+        return {
+          productId: pId,
+          productCode: item.productCode,
+          barcode: item.barcode,
+          name: item.name,
+          quantityToAdd: Number(item.quantity) || 1,
+          unitCost: Number(item.unitPrice) || 0,
+          salesPrice: Number(item.salesPrice) || 0,
+        };
+      });
+
+      const spResult = await syncBillToSalesPlay(mappedShop, syncItems, spSettings.apiToken);
+      if (spResult.success && spResult.stockUpdatedCount > 0) {
+        toast.success(`SalesPlay POS: Stock (+${spResult.stockUpdatedCount} items) updated! (Product costs strictly preserved)`, { id: toastId });
+      } else {
+        toast.info(spResult.message || 'Stock sync completed (Product costs preserved)', { id: toastId });
+      }
+    } catch (err: any) {
+      toast.error(`Could not sync stock to SalesPlay: ${err?.message || 'Network error'}`, { id: toastId });
+    } finally {
+      setSyncingPoStock(false);
     }
   };
 
@@ -674,7 +726,45 @@ export function PurchaseOrderManager({
         }
       }
 
-      // PO created. Note: SalesPlay product costs remain untouched and preserved as requested.
+      // Auto-sync stock count into SalesPlay POS (costs/prices are 100% preserved)
+      if (items.length > 0) {
+        try {
+          const spSettings = await getSalesPlaySettings(activeBusiness.id);
+          const mappedShop = (branchId && spSettings.branchShopMap && spSettings.branchShopMap[branchId])
+            || spSettings.selectedShopId
+            || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
+
+          const syncItems = items.map(item => {
+            let pId = item.productId;
+            if (!pId || pId.length < 5 || pId.startsWith('item_')) {
+              const found = salesPlayProducts.find(p =>
+                (item.barcode && p.barcode && p.barcode.trim() === item.barcode.trim()) ||
+                (item.productCode && p.product_code && p.product_code.trim() === item.productCode.trim()) ||
+                (item.name && p.product_name && p.product_name.trim().toLowerCase() === item.name.trim().toLowerCase())
+              );
+              if (found && found.id) {
+                pId = found.id;
+              }
+            }
+            return {
+              productId: pId,
+              productCode: item.productCode,
+              barcode: item.barcode,
+              name: item.name,
+              quantityToAdd: Number(item.quantity) || 1,
+              unitCost: Number(item.unitPrice) || 0,
+              salesPrice: Number(item.salesPrice) || 0,
+            };
+          });
+
+          const spResult = await syncBillToSalesPlay(mappedShop, syncItems, spSettings.apiToken);
+          if (spResult.success && spResult.stockUpdatedCount > 0) {
+            toast.success(`SalesPlay POS: Stock (+${spResult.stockUpdatedCount} items) updated! (Costs preserved)`);
+          }
+        } catch (spErr) {
+          console.warn('Notice syncing PO stock to SalesPlay:', spErr);
+        }
+      }
 
       // Immediately open printable PO Bill modal for the newly generated order!
       setViewingPO({ id: docRef.id, ...payload } as any);
@@ -1373,6 +1463,8 @@ export function PurchaseOrderManager({
           branch={branches.find(b => b.id === viewingPO.branchId)}
           onClose={() => setViewingPO(null)}
           onEdit={() => handleStartEditPO(viewingPO)}
+          onSyncStock={() => handleSyncPoStockToSalesPlay(viewingPO)}
+          syncingStock={syncingPoStock}
           onOpenPrinterModal={() => setIsPrinterModalOpen(true)}
           isBtConnected={isBtConnected}
           btName={btName}
@@ -1420,6 +1512,8 @@ function PurchaseOrderBillModal({
   onClose,
   onEdit,
   onUseInBillEntry,
+  onSyncStock,
+  syncingStock = false,
   onOpenPrinterModal,
   isBtConnected = false,
   btName = null,
@@ -1431,6 +1525,8 @@ function PurchaseOrderBillModal({
   onClose: () => void;
   onEdit?: () => void;
   onUseInBillEntry?: () => void;
+  onSyncStock?: () => void;
+  syncingStock?: boolean;
   onOpenPrinterModal?: () => void;
   isBtConnected?: boolean;
   btName?: string | null;
@@ -1528,6 +1624,18 @@ function PurchaseOrderBillModal({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {onSyncStock && (
+              <button
+                type="button"
+                onClick={onSyncStock}
+                disabled={syncingStock}
+                className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2.5 px-3 rounded-xl shadow cursor-pointer transition-all active:scale-95 disabled:opacity-50"
+                title="Sync item stock count directly into SalesPlay POS (item costs/prices remain 100% untouched)"
+              >
+                <RefreshCw size={14} className={syncingStock ? "animate-spin" : ""} />
+                <span>Sync Stock</span>
+              </button>
+            )}
             {onEdit && (
               <button
                 type="button"

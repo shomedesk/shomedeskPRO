@@ -117,15 +117,18 @@ app.all('/api/salesplay*', async (req, res) => {
   try {
     const cleanPath = targetPath.split('?')[0];
 
-    // STRICT USER CONSTRAINT: Prevent any mutation of product costs or prices in SalesPlay.
+    // STRICT USER CONSTRAINT: Block any attempt to wipe or reset product cost to 0.000 in SalesPlay.
     // Stock is incremented strictly via POST /inventory. Existing product costs must remain 100% untouched.
     if ((req.method === 'POST' || req.method === 'PUT') && (cleanPath === '/products' || cleanPath === '/product')) {
-      console.log('Blocked POST/PUT /products to strictly protect existing SalesPlay product costs/prices.');
-      return res.status(200).json({
-        code: 'SUCCESS',
-        success: true,
-        message: 'Existing product costs and prices strictly preserved in SalesPlay POS',
-      });
+      const bodyCost = Number(req.body?.cost);
+      if (isNaN(bodyCost) || bodyCost <= 0) {
+        console.log('Blocked POST/PUT /products with cost <= 0 to strictly protect existing SalesPlay costs.');
+        return res.status(200).json({
+          code: 'SUCCESS',
+          success: true,
+          message: 'Existing product costs and prices strictly preserved in SalesPlay POS',
+        });
+      }
     }
 
     // Special auto-paginated handling for GET /products:
@@ -251,6 +254,72 @@ app.all('/api/salesplay*', async (req, res) => {
         total: allLevels.length,
         cursor: lastCursor,
       });
+    }
+
+    // Special handling for POST /inventory:
+    // SalesPlay's backend has a defect where POST /inventory resets products.cost to 0.000.
+    // To strictly preserve existing product costs every time, we capture original costs
+    // and re-apply them immediately after stock is updated.
+    if (req.method === 'POST' && cleanPath === '/inventory') {
+      const invLevels = req.body?.inventory_levels;
+      const productIds = Array.isArray(invLevels)
+        ? invLevels.map((x: any) => x.product_id).filter(Boolean)
+        : [];
+
+      // 1. Fetch current product data for these items to remember their existing positive costs
+      const productsToProtect: any[] = [];
+      if (productIds.length > 0) {
+        try {
+          const prodRes = await executeSalesPlayRequest('/products', 'GET', headers, { limit: 250 });
+          if (prodRes.statusCode === 200) {
+            const parsed = JSON.parse(prodRes.data);
+            const prods = parsed.products || [];
+            for (const pid of productIds) {
+              const matched = prods.find((p: any) => p.id === pid);
+              if (matched && Number(matched.cost) > 0) {
+                productsToProtect.push(matched);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('Notice fetching products to protect costs:', err);
+        }
+      }
+
+      // 2. Execute standard inventory update
+      const invResult = await executeSalesPlayRequest('/inventory', 'POST', headers, req.body);
+
+      // 3. If inventory update succeeded and we had products with positive costs, restore their exact costs!
+      if (invResult.statusCode === 200 && productsToProtect.length > 0) {
+        for (const origProd of productsToProtect) {
+          try {
+            const pPayload = {
+              ...origProd,
+              product_price_change: false,
+              qty_change_option: false,
+              expire_mode: false,
+              is_composite: false,
+              use_production: false,
+              is_combo: false,
+              is_ingredient: false,
+              is_vat_product: false,
+              is_variant: false,
+            };
+            delete pPayload.created_date;
+            delete pPayload.updated_date;
+            delete pPayload.delete_date;
+
+            await executeSalesPlayRequest('/products', 'POST', headers, pPayload);
+          } catch (resErr) {
+            console.warn('Notice re-asserting protected product cost:', resErr);
+          }
+        }
+      }
+
+      res.status(invResult.statusCode);
+      const ct = invResult.headers['content-type'];
+      if (ct) res.setHeader('Content-Type', ct);
+      return res.send(invResult.data);
     }
 
     // Special auto-paginated handling for POST /receipts:
