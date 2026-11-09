@@ -414,6 +414,47 @@ export function ProductSearchAndScan({
             })}
           </div>
         )}
+
+        {/* Not Found Dropdown - Offers immediate SalesPlay Sync & Custom Add */}
+        {isDropdownOpen && searchResults.length === 0 && searchTerm.trim() && (
+          <div className="absolute left-0 right-0 top-full mt-1.5 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl z-30 p-4 text-center animate-in fade-in slide-in-from-top-1">
+            <p className="text-xs text-slate-300 font-medium">
+              No product found matching "<span className="text-white font-bold">{searchTerm}</span>"
+            </p>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Did you recently add it in SalesPlay POS? Sync now to import it instantly:
+            </p>
+            <div className="flex items-center justify-center gap-2 mt-3 flex-wrap">
+              {onSyncSalesPlay && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSyncSalesPlay().catch(() => {});
+                  }}
+                  disabled={isSyncing}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50 transition-all shadow-md shadow-blue-900/40"
+                >
+                  <RefreshCw size={13} className={isSyncing ? 'animate-spin' : ''} />
+                  <span>{isSyncing ? 'Syncing...' : 'Sync from SalesPlay'}</span>
+                </button>
+              )}
+              {onAddCustomWithBarcode && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onAddCustomWithBarcode(searchTerm);
+                    setIsDropdownOpen(false);
+                    setSearchTerm('');
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold border border-slate-700 cursor-pointer transition-all"
+                >
+                  <Plus size={13} />
+                  <span>Add as Custom Item</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

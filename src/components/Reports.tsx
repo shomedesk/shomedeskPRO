@@ -25,7 +25,8 @@ import {
   CheckCircle2,
   RefreshCw,
   Store,
-  Layers
+  Layers,
+  Package
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { formatAmount, toStrictDecimal3 } from '@/src/lib/currencyUtils';
@@ -33,6 +34,7 @@ import { downloadElementAsPdf, generateBusinessReportPdf } from '@/src/lib/pdfUt
 import * as XLSX from 'xlsx';
 import { toast } from 'sonner';
 import { getCachedSalesInvoices } from '@/src/services/salesplay';
+import { ProductReportModal } from './ProductReportModal';
 
 export type ReportTab = 
   | 'daily' 
@@ -42,11 +44,13 @@ export type ReportTab =
   | 'payment_mode' 
   | 'purchases' 
   | 'expenses' 
-  | 'transactions';
+  | 'transactions'
+  | 'products';
 
 export default function Reports() {
   const { selectedBusiness, selectedBranch, branches, isAllBusinessesSelected, businesses } = useBusiness();
   const [activeTab, setActiveTab] = useState<ReportTab>('pnl');
+  const [showProductModal, setShowProductModal] = useState<boolean>(false);
   const [dateRange, setDateRange] = useState({
     start: format(startOfMonth(new Date()), 'yyyy-MM-dd'),
     end: format(new Date(), 'yyyy-MM-dd'),
@@ -71,6 +75,15 @@ export default function Reports() {
       setFilterBranchId('all');
     }
   }, [selectedBranch]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('tab') === 'products' || params.get('report') === 'products') {
+        setShowProductModal(true);
+      }
+    }
+  }, []);
 
   // Background refresh data logic with offline local cache safeguard
   const fetchAllReportData = async () => {
@@ -575,6 +588,16 @@ export default function Reports() {
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
+            onClick={() => setShowProductModal(true)}
+            className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-black py-2.5 px-4 rounded-xl shadow-lg shadow-blue-900/30 transition-all cursor-pointer active:scale-95"
+            title="Import all items from SalesPlay: Serial, Name, Category, Barcode, Cost, Sale Price, Qty and download multi-page PDF"
+          >
+            <Package size={15} />
+            <span>Product Report (SalesPlay)</span>
+          </button>
+
+          <button
+            type="button"
             disabled={loading}
             onClick={fetchAllReportData}
             className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold py-2.5 px-3.5 rounded-xl border border-slate-700 transition-all cursor-pointer active:scale-95 disabled:opacity-50"
@@ -588,7 +611,7 @@ export default function Reports() {
             type="button"
             disabled={isExportingPdf}
             onClick={handleDownloadPdf}
-            className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-black py-2.5 px-4 rounded-xl shadow-lg shadow-blue-900/30 transition-all cursor-pointer active:scale-95 disabled:opacity-50"
+            className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-black py-2.5 px-4 rounded-xl border border-slate-700 shadow-lg transition-all cursor-pointer active:scale-95 disabled:opacity-50"
             title="Download clean vector PDF report"
           >
             <Download size={15} />
@@ -618,11 +641,18 @@ export default function Reports() {
           { id: 'purchases', label: '📦 Purchases & Dues', desc: 'Accounts Payable' },
           { id: 'expenses', label: '🧾 Itemized Expenses', desc: 'Operating Costs' },
           { id: 'transactions', label: '📑 Ledger Feed', desc: 'Cash/Bank Trans' },
+          { id: 'products', label: '📦 Product Stock & Prices', desc: 'All SalesPlay Items' },
         ].map(tab => (
           <button
             key={tab.id}
             type="button"
-            onClick={() => setActiveTab(tab.id as ReportTab)}
+            onClick={() => {
+              if (tab.id === 'products') {
+                setShowProductModal(true);
+              } else {
+                setActiveTab(tab.id as ReportTab);
+              }
+            }}
             className={cn(
               "px-3.5 py-2 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap",
               activeTab === tab.id 
@@ -1219,6 +1249,16 @@ export default function Reports() {
           </div>
         )}
 
+      {/* SalesPlay Complete Product Report Modal */}
+      {showProductModal && (
+        <ProductReportModal
+          isOpen={showProductModal}
+          onClose={() => setShowProductModal(false)}
+          currency={currency}
+          selectedBusiness={selectedBusiness}
+          selectedBranch={selectedBranch}
+        />
+      )}
       </div>
     </div>
   );

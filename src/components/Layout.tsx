@@ -30,7 +30,8 @@ import {
   Globe,
   ShoppingBag,
   RefreshCw,
-  Bluetooth
+  Bluetooth,
+  Boxes
 } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { auth } from '@/src/lib/firebase';
@@ -274,6 +275,7 @@ export default function Layout() {
                 <SidebarItem to="/payroll" icon={<DollarSign size={20} />} label="Payroll" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
                 <SidebarItem to="/report" icon={<FileText size={20} />} label="Daily Reports" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
                 <SidebarItem to="/reports" icon={<FileDown size={20} />} label="Business Reports" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
+                <SidebarItem to="/reports?tab=products" icon={<Boxes size={20} />} label="Product Report" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
                 <SidebarItem to="/suppliers" icon={<Package size={20} />} label="Suppliers" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
               </div>
 
@@ -305,6 +307,7 @@ export default function Layout() {
                 <SidebarItem to="/cash-count" icon={<Calculator size={20} />} label="Cash Count" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
                 <SidebarItem to="/report" icon={<FileText size={20} />} label="Submit Report" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
                 <SidebarItem to="/reports" icon={<FileDown size={20} />} label="Business Reports" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
+                <SidebarItem to="/reports?tab=products" icon={<Boxes size={20} />} label="Product Report" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
                 <SidebarItem to="/suppliers" icon={<Package size={20} />} label="Suppliers" isOpen={isSidebarOpen} onClick={() => setIsMobileMenuOpen(false)} />
               </div>
             </>

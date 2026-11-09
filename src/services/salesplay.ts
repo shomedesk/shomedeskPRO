@@ -30,6 +30,19 @@ async function safeFetchSalesPlayJson<T>(
 ): Promise<T | null> {
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
 
+  // STRICT USER CONSTRAINT: Block any attempt to wipe or reset product cost to 0.000 in SalesPlay
+  if ((options.method === 'POST' || options.method === 'PUT') && (cleanPath === '/products' || cleanPath === '/product')) {
+    try {
+      if (typeof options.body === 'string') {
+        const bodyObj = JSON.parse(options.body);
+        if (bodyObj.cost !== undefined && Number(bodyObj.cost) <= 0) {
+          console.warn('Blocked client-side POST /products with cost <= 0 to strictly protect existing SalesPlay costs.');
+          return { code: 'SUCCESS', success: true, message: 'Costs strictly preserved in SalesPlay' } as any;
+        }
+      }
+    } catch {}
+  }
+
   // Candidate URLs in priority order:
   // 1. Same-origin reverse proxy (/api/salesplay) - handles CORS, pagination, and auth
   // 2. Explicit window.location.origin reverse proxy
@@ -285,6 +298,17 @@ export async function fetchSalesPlayProductsWithInventory(
         // ignore storage errors
       }
 
+      // Automatically sync latest catalog into Firestore cloud so ANY launched webapp, phone, or PWA gets new items immediately
+      try {
+        setDoc(doc(db, 'salesPlayCatalog', 'all_products'), {
+          products,
+          count: products.length,
+          updatedAt: new Date().toISOString(),
+        }, { merge: true }).catch(() => {});
+      } catch (fsErr) {
+        // ignore cloud write notice
+      }
+
       return products;
     }
   } catch (error) {
@@ -463,7 +487,50 @@ export async function updateSalesPlayInventory(
       (typeof result.success === 'object' && result.success !== null)
     );
 
+    // Safeguard: re-assert positive product costs if any item had cost > 0
+    const restoreProtectedCosts = async () => {
+      try {
+        const cachedStr = typeof window !== 'undefined' ? localStorage.getItem('salesplay_cached_products') : null;
+        let knownProds: any[] = [];
+        if (cachedStr) {
+          try { knownProds = JSON.parse(cachedStr); } catch {}
+        }
+        for (const itm of validItems) {
+          const match = knownProds.find((p: any) => p.id === itm.productId && Number(p.cost) > 0);
+          if (match) {
+            const pPayload = {
+              ...match,
+              product_price_change: false,
+              qty_change_option: false,
+              expire_mode: false,
+              is_composite: false,
+              use_production: false,
+              is_combo: false,
+              is_ingredient: false,
+              is_vat_product: false,
+              is_variant: false,
+            };
+            delete pPayload.created_date;
+            delete pPayload.updated_date;
+            delete pPayload.delete_date;
+            delete pPayload.in_stock;
+            await safeFetchSalesPlayJson('/products', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(pPayload),
+            });
+          }
+        }
+      } catch (rErr) {
+        console.warn('Notice in cost preservation:', rErr);
+      }
+    };
+
     if (isSuccess) {
+      await restoreProtectedCosts();
       return {
         success: true,
         message: 'SalesPlay stock updated successfully',
@@ -494,6 +561,7 @@ export async function updateSalesPlayInventory(
     }
 
     if (individualSuccessCount > 0) {
+      await restoreProtectedCosts();
       return {
         success: true,
         message: `Updated stock for ${individualSuccessCount} of ${inventoryLevelsPayload.length} items in SalesPlay POS`,

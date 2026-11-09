@@ -93,6 +93,80 @@ function executeSalesPlayRequest(
   });
 }
 
+// Helper to fetch all SalesPlay products across all pages (handles 400+ items without missing any)
+async function fetchAllSalesPlayProductsList(headers: Record<string, string>): Promise<any[]> {
+  const allProducts: any[] = [];
+  const seenIds = new Set<string>();
+  let cursor = '';
+  let pageCount = 0;
+
+  while (pageCount < 30) {
+    pageCount++;
+    const body: Record<string, any> = { limit: 250 };
+    if (cursor) body.cursor = cursor;
+    const result = await executeSalesPlayRequest('/products', 'GET', headers, body);
+    if (result.statusCode !== 200) break;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(result.data);
+    } catch {
+      break;
+    }
+    const prods = parsed.products || [];
+    if (!Array.isArray(prods) || prods.length === 0) break;
+
+    for (const p of prods) {
+      const key = p.id || p.product_code;
+      if (key && !seenIds.has(key)) {
+        seenIds.add(key);
+        allProducts.push(p);
+      } else if (!key) {
+        allProducts.push(p);
+      }
+    }
+
+    if (!parsed.cursor || parsed.cursor === cursor) break;
+    cursor = parsed.cursor;
+  }
+  return allProducts;
+}
+
+// Helper to fetch all SalesPlay inventory levels across all pages
+async function fetchAllSalesPlayInventoryLevels(headers: Record<string, string>): Promise<any[]> {
+  const allLevels: any[] = [];
+  const seenKeys = new Set<string>();
+  let cursor = '';
+  let pageCount = 0;
+
+  while (pageCount < 30) {
+    pageCount++;
+    const body: Record<string, any> = { limit: 250 };
+    if (cursor) body.cursor = cursor;
+    const result = await executeSalesPlayRequest('/inventory', 'GET', headers, body);
+    if (result.statusCode !== 200) break;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(result.data);
+    } catch {
+      break;
+    }
+    const levels = parsed.inventory_levels || [];
+    if (!Array.isArray(levels) || levels.length === 0) break;
+
+    for (const lvl of levels) {
+      const key = `${lvl.product_id}_${lvl.shop_id || ''}`;
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        allLevels.push(lvl);
+      }
+    }
+
+    if (!parsed.cursor || parsed.cursor === cursor) break;
+    cursor = parsed.cursor;
+  }
+  return allLevels;
+}
+
 // SalesPlay POS Reverse Proxy - Works in both dev and production
 app.all('/api/salesplay*', async (req, res) => {
   if (req.path === '/api/salesplay/trigger-cloud-sync' || req.originalUrl?.includes('/trigger-cloud-sync')) {
@@ -133,10 +207,7 @@ app.all('/api/salesplay*', async (req, res) => {
 
     // Special auto-paginated handling for GET /products:
     if (req.method === 'GET' && cleanPath === '/products') {
-      const allProducts: any[] = [];
-      const seenIds = new Set<string>();
       let cursor = (req.query.cursor as string) || '';
-      let lastCursor = '';
 
       // If client explicitly requests a single page
       if (req.query.page_only === 'true') {
@@ -148,51 +219,14 @@ app.all('/api/salesplay*', async (req, res) => {
         return res.send(result.data);
       }
 
-      // Loop to fetch ALL products across all pages
-      let pageCount = 0;
-      while (pageCount < 30) {
-        pageCount++;
-        const body: Record<string, any> = { limit: 250 };
-        if (cursor) body.cursor = cursor;
-        const result = await executeSalesPlayRequest('/products', 'GET', headers, body);
-        if (result.statusCode !== 200) {
-          if (allProducts.length > 0) break;
-          res.status(result.statusCode);
-          res.setHeader('Content-Type', 'application/json');
-          return res.send(result.data);
-        }
-        let parsed: any;
-        try {
-          parsed = JSON.parse(result.data);
-        } catch {
-          break;
-        }
-        const prods = parsed.products || [];
-        if (!Array.isArray(prods) || prods.length === 0) {
-          break;
-        }
-        for (const p of prods) {
-          const key = p.id || p.product_code;
-          if (key && !seenIds.has(key)) {
-            seenIds.add(key);
-            allProducts.push(p);
-          } else if (!key) {
-            allProducts.push(p);
-          }
-        }
-        lastCursor = parsed.cursor || '';
-        if (!parsed.cursor || parsed.cursor === cursor) {
-          break;
-        }
-        cursor = parsed.cursor;
-      }
+      // Fetch all products across all pages (guarantees all 400+ items)
+      const allProducts = await fetchAllSalesPlayProductsList(headers);
 
       res.status(200);
       res.setHeader('Content-Type', 'application/json');
       return res.json({
         products: allProducts,
         total: allProducts.length,
-        cursor: lastCursor,
       });
     }
 
@@ -206,53 +240,24 @@ app.all('/api/salesplay*', async (req, res) => {
 
     // Special handling for GET /inventory:
     if (req.method === 'GET' && cleanPath === '/inventory') {
-      const allLevels: any[] = [];
-      const seenKeys = new Set<string>();
       let cursor = (req.query.cursor as string) || '';
-      let lastCursor = '';
 
-      let pageCount = 0;
-      while (pageCount < 30) {
-        pageCount++;
+      if (req.query.page_only === 'true') {
         const body: Record<string, any> = { limit: 250 };
         if (cursor) body.cursor = cursor;
         const result = await executeSalesPlayRequest('/inventory', 'GET', headers, body);
-        if (result.statusCode !== 200) {
-          if (allLevels.length > 0) break;
-          res.status(result.statusCode);
-          res.setHeader('Content-Type', 'application/json');
-          return res.send(result.data);
-        }
-        let parsed: any;
-        try {
-          parsed = JSON.parse(result.data);
-        } catch {
-          break;
-        }
-        const levels = parsed.inventory_levels || [];
-        if (!Array.isArray(levels) || levels.length === 0) {
-          break;
-        }
-        for (const lvl of levels) {
-          const key = `${lvl.product_id}_${lvl.shop_id || ''}`;
-          if (!seenKeys.has(key)) {
-            seenKeys.add(key);
-            allLevels.push(lvl);
-          }
-        }
-        lastCursor = parsed.cursor || '';
-        if (!parsed.cursor || parsed.cursor === cursor) {
-          break;
-        }
-        cursor = parsed.cursor;
+        res.status(result.statusCode);
+        res.setHeader('Content-Type', 'application/json');
+        return res.send(result.data);
       }
+
+      const allLevels = await fetchAllSalesPlayInventoryLevels(headers);
 
       res.status(200);
       res.setHeader('Content-Type', 'application/json');
       return res.json({
         inventory_levels: allLevels,
         total: allLevels.length,
-        cursor: lastCursor,
       });
     }
 
@@ -266,19 +271,15 @@ app.all('/api/salesplay*', async (req, res) => {
         ? invLevels.map((x: any) => x.product_id).filter(Boolean)
         : [];
 
-      // 1. Fetch current product data for these items to remember their existing positive costs
+      // 1. Fetch current product data for these items to remember their existing positive costs (checks all 400+ items)
       const productsToProtect: any[] = [];
       if (productIds.length > 0) {
         try {
-          const prodRes = await executeSalesPlayRequest('/products', 'GET', headers, { limit: 250 });
-          if (prodRes.statusCode === 200) {
-            const parsed = JSON.parse(prodRes.data);
-            const prods = parsed.products || [];
-            for (const pid of productIds) {
-              const matched = prods.find((p: any) => p.id === pid);
-              if (matched && Number(matched.cost) > 0) {
-                productsToProtect.push(matched);
-              }
+          const prods = await fetchAllSalesPlayProductsList(headers);
+          for (const pid of productIds) {
+            const matched = prods.find((p: any) => p.id === pid);
+            if (matched && Number(matched.cost) > 0) {
+              productsToProtect.push(matched);
             }
           }
         } catch (err) {
@@ -525,39 +526,11 @@ async function runAutoSalesPlaySync(): Promise<void> {
       }
     }
 
-    // 2. Sync All Products
-    const allProducts: any[] = [];
-    const seenIds = new Set<string>();
-    let prodCursor = '';
-    let prodPageCount = 0;
-
-    while (prodPageCount < 30) {
-      prodPageCount++;
-      const body: Record<string, any> = { limit: 250 };
-      if (prodCursor) body.cursor = prodCursor;
-      const res = await executeSalesPlayRequest('/products', 'GET', headers, body);
-      if (res.statusCode !== 200) break;
-      let parsed: any;
-      try { parsed = JSON.parse(res.data); } catch { break; }
-      const prods = parsed.products || [];
-      if (!Array.isArray(prods) || prods.length === 0) break;
-      for (const p of prods) {
-        const k = p.id || p.product_code;
-        if (k && !seenIds.has(k)) {
-          seenIds.add(k);
-          allProducts.push(p);
-        } else if (!k) {
-          allProducts.push(p);
-        }
-      }
-      if (!parsed.cursor || parsed.cursor === prodCursor) break;
-      prodCursor = parsed.cursor;
-    }
+    // 2. Sync All Products & Inventory (guarantees all 400+ items)
+    const allProducts = await fetchAllSalesPlayProductsList(headers);
 
     if (allProducts.length > 0) {
-      const invRes = await executeSalesPlayRequest('/inventory', 'GET', headers, { limit: 250 });
-      let levels: any[] = [];
-      try { levels = JSON.parse(invRes.data).inventory_levels || []; } catch {}
+      const levels = await fetchAllSalesPlayInventoryLevels(headers);
       const stockMap: Record<string, number> = {};
       for (const lvl of levels) {
         stockMap[lvl.product_id] = Number(lvl.in_stock) || 0;
@@ -602,6 +575,26 @@ app.all('/api/salesplay/trigger-cloud-sync', async (_req, res) => {
 // Health check endpoint
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// SalesPlay Image Proxy Endpoint (allows caching and CORS-safe PDF rendering)
+app.get('/api/salesplay/image-proxy', async (req, res) => {
+  const imageUrl = req.query.url as string;
+  if (!imageUrl || !imageUrl.startsWith('http')) {
+    return res.status(400).send('Invalid url');
+  }
+  try {
+    const response = await fetch(imageUrl);
+    if (!response.ok) return res.status(response.status).send('Failed to fetch image');
+    const contentType = response.headers.get('content-type') || 'image/png';
+    const buffer = Buffer.from(await response.arrayBuffer());
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=604800');
+    return res.send(buffer);
+  } catch (err: any) {
+    return res.status(500).send(err?.message || 'Error fetching image');
+  }
 });
 
 // Production vs Development routing

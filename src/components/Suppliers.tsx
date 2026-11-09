@@ -63,6 +63,7 @@ import { generateBillPdf } from '@/src/lib/pdfUtils';
 import { PurchaseOrderManager } from './PurchaseOrderManager';
 import { BillReceiptModal } from './BillReceiptModal';
 import { PurchaseReportModal } from './PurchaseReportModal';
+import { ProductReportModal } from './ProductReportModal';
 import { SalesPlaySyncModal } from './SalesPlaySyncModal';
 import { EditPurchaseBillModal } from './EditPurchaseBillModal';
 import { Barcode } from './Barcode';
@@ -102,6 +103,7 @@ export default function Suppliers() {
   const [loading, setLoading] = useState(true);
   const [selectedPOForEntry, setSelectedPOForEntry] = useState<PurchaseOrder | null>(null);
   const [showSalesPlayModal, setShowSalesPlayModal] = useState(false);
+  const [showProductReportModal, setShowProductReportModal] = useState(false);
   const [salesPlayProducts, setSalesPlayProducts] = useState<SalesPlayProduct[]>(FALLBACK_SALESPLAY_PRODUCTS);
   const [isSyncingSalesPlay, setIsSyncingSalesPlay] = useState(false);
 
@@ -270,16 +272,29 @@ export default function Suppliers() {
           />
         </div>
 
-        {/* SalesPlay POS Integration Badge / Trigger */}
-        <button
-          onClick={() => setShowSalesPlayModal(true)}
-          className="flex items-center justify-center gap-2 bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-400 border border-emerald-800/70 py-2.5 sm:py-3 px-4 rounded-2xl text-[11px] sm:text-xs font-black uppercase tracking-wider transition-all cursor-pointer shadow-lg active:scale-95 shrink-0"
-          title="SalesPlay POS integration, shop mapping and live stock sync"
-        >
-          <Store size={16} />
-          <span>SalesPlay POS</span>
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-        </button>
+        <div className="flex items-center gap-2">
+          {/* SalesPlay POS Integration Badge / Trigger */}
+          <button
+            onClick={() => setShowSalesPlayModal(true)}
+            className="flex items-center justify-center gap-2 bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-400 border border-emerald-800/70 py-2.5 sm:py-3 px-4 rounded-2xl text-[11px] sm:text-xs font-black uppercase tracking-wider transition-all cursor-pointer shadow-lg active:scale-95 shrink-0"
+            title="SalesPlay POS integration, shop mapping and live stock sync"
+          >
+            <Store size={16} />
+            <span>SalesPlay POS</span>
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          </button>
+
+          {/* Product Report Button */}
+          <button
+            onClick={() => setShowProductReportModal(true)}
+            className="flex items-center justify-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white border border-blue-500/40 py-2.5 sm:py-3 px-4 rounded-2xl text-[11px] sm:text-xs font-black uppercase tracking-wider transition-all cursor-pointer shadow-lg shadow-blue-900/30 active:scale-95 shrink-0"
+            title="Import all items from SalesPlay: Serial, Name, Category, Barcode, Cost, Sale Price, Qty and download multi-page PDF"
+          >
+            <Package size={16} />
+            <span>Product Report</span>
+            <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full font-mono">{salesPlayProducts.length || '414'}</span>
+          </button>
+        </div>
       </div>
 
       {/* Main Tab Panels */}
@@ -311,6 +326,7 @@ export default function Suppliers() {
             activeBusinessId={selectedBusiness?.id || (businesses.length > 0 ? businesses[0]?.id : undefined)}
             onSyncSalesPlay={handleSyncSalesPlay}
             isSyncingSalesPlay={isSyncingSalesPlay}
+            onOpenProductReport={() => setShowProductReportModal(true)}
           />
         </div>
       )}
@@ -356,6 +372,18 @@ export default function Suppliers() {
           branches={branches}
           currency={currency}
           onClose={() => setShowSalesPlayModal(false)}
+        />
+      )}
+
+      {/* SalesPlay Complete Product Report Modal */}
+      {showProductReportModal && (
+        <ProductReportModal
+          isOpen={showProductReportModal}
+          onClose={() => setShowProductReportModal(false)}
+          currency={currency}
+          selectedBusiness={selectedBusiness || businesses[0] || null}
+          selectedBranch={selectedBranch}
+          initialProducts={salesPlayProducts}
         />
       )}
     </div>
@@ -1849,6 +1877,7 @@ function RecentLogs({
   activeBusinessId,
   onSyncSalesPlay,
   isSyncingSalesPlay = false,
+  onOpenProductReport,
 }: {
   logs: PurchaseLog[];
   currency: string;
@@ -1861,6 +1890,7 @@ function RecentLogs({
   activeBusinessId?: string;
   onSyncSalesPlay?: () => Promise<void>;
   isSyncingSalesPlay?: boolean;
+  onOpenProductReport?: () => void;
 }) {
   const { userProfile } = useBusiness();
   const isAdmin = userProfile?.role === 'admin' || auth.currentUser?.email === 'shomedesk@gmail.com';
@@ -1942,15 +1972,28 @@ function RecentLogs({
           <h3 className="text-xs font-black uppercase tracking-[0.2em]">Recent Purchase Logs</h3>
         </div>
 
-        {logs.length > 0 && (
-          <button
-            onClick={() => setShowReportModal(true)}
-            className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold py-2 px-3.5 rounded-xl border border-slate-700 transition-all cursor-pointer self-start sm:self-auto"
-          >
-            <Download size={14} className="text-emerald-400" />
-            Download Purchase Report (Excel / PDF)
-          </button>
-        )}
+        <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
+          {onOpenProductReport && (
+            <button
+              onClick={onOpenProductReport}
+              className="flex items-center gap-2 bg-gradient-to-r from-blue-600/90 to-indigo-600/90 hover:from-blue-600 hover:to-indigo-600 text-white text-xs font-bold py-2 px-3.5 rounded-xl border border-blue-500/30 transition-all cursor-pointer shadow-md"
+              title="View full report of all SalesPlay items: cost, sale price & stock quantities"
+            >
+              <Package size={14} className="text-white" />
+              All Products Report (PDF)
+            </button>
+          )}
+
+          {logs.length > 0 && (
+            <button
+              onClick={() => setShowReportModal(true)}
+              className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold py-2 px-3.5 rounded-xl border border-slate-700 transition-all cursor-pointer"
+            >
+              <Download size={14} className="text-emerald-400" />
+              Download Purchase Report (Excel / PDF)
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="space-y-3">

@@ -4,7 +4,8 @@ import html2canvas from 'html2canvas';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import JsBarcode from 'jsbarcode';
-import { PurchaseLog, PurchaseOrder, Business, Branch, Supplier, DailyReport } from '@/src/types';
+import * as XLSX from 'xlsx';
+import { PurchaseLog, PurchaseOrder, Business, Branch, Supplier, DailyReport, SalesPlayProduct } from '@/src/types';
 import { formatAmount } from './currencyUtils';
 
 /**
@@ -2050,3 +2051,503 @@ export function generateSupplierStatementPdf({
   }
 }
 
+/**
+ * Helper to fetch and convert an image URL into a compact 96x96 Base64 PNG.
+ * Includes direct CORS fetch + local server proxy fallback and quick timeout.
+ */
+async function loadImageAsBase64(url: string, timeoutMs = 2000): Promise<string | null> {
+  if (!url || typeof window === 'undefined') return null;
+
+  return new Promise((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => {
+      if (!finished) {
+        finished = true;
+        resolve(null);
+      }
+    }, timeoutMs);
+
+    const tryLoad = (srcUrl: string, isFallback: boolean = false) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        if (!finished) {
+          finished = true;
+          clearTimeout(timer);
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = 96;
+            canvas.height = 96;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(img, 0, 0, 96, 96);
+              resolve(canvas.toDataURL('image/png'));
+            } else {
+              resolve(null);
+            }
+          } catch {
+            resolve(null);
+          }
+        }
+      };
+      img.onerror = () => {
+        if (!isFallback && !srcUrl.startsWith('/api/')) {
+          tryLoad(`/api/salesplay/image-proxy?url=${encodeURIComponent(url)}`, true);
+        } else if (!finished) {
+          finished = true;
+          clearTimeout(timer);
+          resolve(null);
+        }
+      };
+      img.src = srcUrl;
+    };
+
+    tryLoad(url);
+  });
+}
+
+/**
+ * Generates and downloads a multi-page PDF for the complete SalesPlay Product Catalog.
+ * Includes:
+ * 1. REAL, SCANNABLE BARCODES (laser scanner & phone camera compatible).
+ * 2. PRODUCT IMAGES (thumbnails rendered directly in the table).
+ * 3. Multi-page auto-splitting with repeated headers & Page X of Y numbering.
+ * 4. Comprehensive stock quantities and inventory valuation.
+ */
+export async function generateProductReportPdf({
+  products,
+  business,
+  branch,
+  currency = 'OMR',
+  filterInfo,
+  includeImages = true,
+}: {
+  products: SalesPlayProduct[];
+  business?: Business | null;
+  branch?: Branch | null;
+  currency?: string;
+  filterInfo?: { category?: string; search?: string; stockFilter?: string };
+  includeImages?: boolean;
+}): Promise<boolean> {
+  if (!products || products.length === 0) {
+    toast.error('No products available to generate report');
+    return false;
+  }
+
+  const toastId = toast.loading(`Generating scannable barcodes & PDF for ${products.length} products...`);
+
+  try {
+    // 1. Pre-generate Scannable Barcodes (CODE128 high-contrast) for all products
+    const barcodeMap = new Map<number, string>();
+    products.forEach((p, idx) => {
+      const rawCode = String(p.barcode || p.product_code || '').trim();
+      if (rawCode) {
+        const b64 = generateBarcodeBase64(rawCode, {
+          height: 38,
+          width: 2.0,
+          displayValue: true,
+          fontSize: 9.5,
+        });
+        if (b64) barcodeMap.set(idx, b64);
+      }
+    });
+
+    // 2. Pre-load Product Images (in concurrent batches of 30 for speed)
+    const imageMap = new Map<number, string>();
+    if (includeImages) {
+      const itemsWithImages = products
+        .map((p, idx) => ({ idx, url: p.image_url }))
+        .filter((x): x is { idx: number; url: string } => !!x.url && x.url.startsWith('http'));
+
+      if (itemsWithImages.length > 0) {
+        toast.loading(`Loading product photos (${itemsWithImages.length} images)...`, { id: toastId });
+        const batchSize = 30;
+        for (let i = 0; i < itemsWithImages.length; i += batchSize) {
+          const batch = itemsWithImages.slice(i, i + batchSize);
+          await Promise.all(
+            batch.map(async (item) => {
+              try {
+                const b64 = await loadImageAsBase64(item.url, 1800);
+                if (b64) imageMap.set(item.idx, b64);
+              } catch {}
+            })
+          );
+        }
+      }
+    }
+
+    toast.loading('Assembling multi-page report...', { id: toastId });
+
+    const doc = new jsPDF({
+      orientation: 'landscape',
+      unit: 'mm',
+      format: 'a4',
+    });
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 10;
+
+    const businessName = business?.name || 'MAKAREM ALKHAIR MODERN';
+    const branchName = branch?.name || 'Main Branch';
+
+    // 1. Header Banner
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.setTextColor(15, 23, 42); // slate-900
+    doc.text(businessName, margin, 14);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    doc.setTextColor(100, 116, 139); // slate-500
+    doc.text(`Branch: ${branchName} • Currency: ${currency}`, margin, 19);
+
+    // Right-aligned report badge & metadata
+    doc.setFillColor(15, 23, 42);
+    doc.roundedRect(pageWidth - margin - 78, 8, 78, 8, 2, 2, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(255, 255, 255);
+    doc.text('SALESPLAY PRODUCT CATALOG & BARCODES', pageWidth - margin - 75, 13.5);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`Generated: ${format(new Date(), 'dd MMM yyyy, hh:mm a')}`, pageWidth - margin, 20, { align: 'right' });
+
+    // Filter subtitle if applicable
+    const activeFilters = [
+      filterInfo?.category && filterInfo.category !== 'all' ? `Category: ${filterInfo.category}` : 'All Categories',
+      filterInfo?.stockFilter && filterInfo.stockFilter !== 'all' ? `Stock: ${filterInfo.stockFilter}` : null,
+      filterInfo?.search ? `Search: "${filterInfo.search}"` : null,
+      `Total Items: ${products.length} Products`,
+      imageMap.size > 0 ? `${imageMap.size} Photos Included` : null,
+    ].filter(Boolean).join(' • ');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(30, 41, 59);
+    doc.text(`Scope: ${activeFilters}`, margin, 24);
+
+    // 2. Summary KPI Metrics Box
+    let totalStockQty = 0;
+    let totalCostVal = 0;
+    let totalRetailVal = 0;
+    let inStockCount = 0;
+
+    for (const p of products) {
+      const q = Number(p.in_stock) || 0;
+      const c = Number(p.cost) || 0;
+      const s = Number(p.price) || 0;
+      totalStockQty += q;
+      totalCostVal += q * c;
+      totalRetailVal += q * s;
+      if (q > 0) inStockCount++;
+    }
+
+    const potentialMargin = totalRetailVal - totalCostVal;
+
+    const kpiBoxY = 26.5;
+    const kpiBoxHeight = 14;
+    doc.setFillColor(248, 250, 252);
+    doc.roundedRect(margin, kpiBoxY, pageWidth - (margin * 2), kpiBoxHeight, 2, 2, 'F');
+    doc.setDrawColor(226, 232, 240);
+    doc.roundedRect(margin, kpiBoxY, pageWidth - (margin * 2), kpiBoxHeight, 2, 2, 'S');
+
+    const colWidth = (pageWidth - (margin * 2)) / 5;
+    const kpiLabels = [
+      { label: 'TOTAL CATALOG PRODUCTS', val: `${products.length} Items (${inStockCount} In-Stock)` },
+      { label: 'TOTAL STOCK QUANTITY', val: `${Math.round(totalStockQty * 1000) / 1000} Units` },
+      { label: `VALUATION @ COST (${currency})`, val: formatAmount(totalCostVal, currency) },
+      { label: `VALUATION @ RETAIL (${currency})`, val: formatAmount(totalRetailVal, currency) },
+      { label: `POTENTIAL GROSS PROFIT (${currency})`, val: formatAmount(potentialMargin, currency) },
+    ];
+
+    kpiLabels.forEach((kpi, idx) => {
+      const x = margin + (idx * colWidth) + 4;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(6);
+      doc.setTextColor(100, 116, 139);
+      doc.text(kpi.label, x, kpiBoxY + 4.5);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(kpi.val, x, kpiBoxY + 10.5);
+
+      if (idx < 4) {
+        doc.setDrawColor(226, 232, 240);
+        doc.line(margin + ((idx + 1) * colWidth), kpiBoxY + 2, margin + ((idx + 1) * colWidth), kpiBoxY + kpiBoxHeight - 2);
+      }
+    });
+
+    // 3. Build Table Data Rows
+    const tableRows = products.map((p, idx) => {
+      const stock = Number(p.in_stock) || 0;
+      const cost = Number(p.cost) || 0;
+      const price = Number(p.price) || 0;
+      const rowCostTotal = Math.round(stock * cost * 1000) / 1000;
+      const rowRetailTotal = Math.round(stock * price * 1000) / 1000;
+
+      return [
+        String(idx + 1),
+        '', // Drawn via didDrawCell (Product photo)
+        (p.product_name || 'Unnamed Item').trim(),
+        (p.category || 'General').trim(),
+        '', // Drawn via didDrawCell (Scannable Barcode)
+        formatAmount(cost, currency),
+        formatAmount(price, currency),
+        `${stock} ${p.measurement || ''}`.trim(),
+        formatAmount(rowCostTotal, currency),
+        formatAmount(rowRetailTotal, currency),
+      ];
+    });
+
+    // 4. Render Multi-Page AutoTable with scannable barcode and image rendering
+    autoTable(doc, {
+      startY: 43,
+      head: [[
+        '#',
+        'Photo',
+        'Product Name',
+        'Category',
+        'Scannable Barcode',
+        `Cost (${currency})`,
+        `Sale Price (${currency})`,
+        'Stock Qty',
+        `Total Cost (${currency})`,
+        `Total Retail (${currency})`,
+      ]],
+      body: tableRows,
+      foot: [[
+        '',
+        '',
+        `TOTALS (${products.length} Products)`,
+        '',
+        '',
+        '',
+        '',
+        `${Math.round(totalStockQty * 1000) / 1000}`,
+        formatAmount(totalCostVal, currency),
+        formatAmount(totalRetailVal, currency),
+      ]],
+      theme: 'striped',
+      headStyles: {
+        fillColor: [15, 23, 42], // slate-900
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 7.5,
+        halign: 'left',
+        valign: 'middle',
+        cellPadding: 2,
+      },
+      footStyles: {
+        fillColor: [30, 41, 59], // slate-800
+        textColor: [255, 255, 255],
+        fontStyle: 'bold',
+        fontSize: 8,
+        halign: 'right',
+        valign: 'middle',
+      },
+      bodyStyles: {
+        fontSize: 7.5,
+        textColor: [30, 41, 59],
+        valign: 'middle',
+        minCellHeight: 14.5, // Critical height for scannable barcodes & clear photos
+        cellPadding: 1.5,
+      },
+      alternateRowStyles: {
+        fillColor: [248, 250, 252], // slate-50
+      },
+      columnStyles: {
+        0: { cellWidth: 8, halign: 'center' }, // #
+        1: { cellWidth: 14, halign: 'center' }, // Photo
+        2: { cellWidth: 62, fontStyle: 'bold' }, // Product Name
+        3: { cellWidth: 26 }, // Category
+        4: { cellWidth: 46, halign: 'center' }, // Scannable Barcode
+        5: { cellWidth: 24, halign: 'right', fontStyle: 'bold' }, // Cost
+        6: { cellWidth: 24, halign: 'right', fontStyle: 'bold', textColor: [2, 132, 199] }, // Sale Price
+        7: { cellWidth: 20, halign: 'center' }, // Stock Qty
+        8: { cellWidth: 26, halign: 'right', fontStyle: 'bold' }, // Total Cost
+        9: { cellWidth: 27, halign: 'right' }, // Total Retail
+      },
+      margin: { top: 15, bottom: 12, left: margin, right: margin },
+      pageBreak: 'auto',
+      didDrawPage: (data) => {
+        // Repeated running header on subsequent pages
+        if (data.pageNumber > 1) {
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(8);
+          doc.setTextColor(15, 23, 42);
+          doc.text(`${businessName} • All Products & Barcodes Report (Page ${data.pageNumber})`, margin, 10);
+
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(7);
+          doc.setTextColor(100, 116, 139);
+          doc.text(`Scope: ${products.length} Products • ${format(new Date(), 'dd MMM yyyy')}`, pageWidth - margin, 10, { align: 'right' });
+
+          doc.setDrawColor(226, 232, 240);
+          doc.setLineWidth(0.3);
+          doc.line(margin, 12, pageWidth - margin, 12);
+        }
+      },
+      didDrawCell: (data) => {
+        if (data.section === 'body') {
+          // Column 1: Product Photo
+          if (data.column.index === 1) {
+            const photoB64 = imageMap.get(data.row.index);
+            const size = 11;
+            const px = data.cell.x + (data.cell.width - size) / 2;
+            const py = data.cell.y + (data.cell.height - size) / 2;
+
+            if (photoB64) {
+              try {
+                doc.addImage(photoB64, 'PNG', px, py, size, size);
+              } catch {
+                // fallback below
+              }
+            } else {
+              // Draw clean fallback initial box
+              doc.setFillColor(241, 245, 249);
+              doc.roundedRect(px, py, size, size, 1.5, 1.5, 'F');
+              doc.setDrawColor(203, 213, 225);
+              doc.roundedRect(px, py, size, size, 1.5, 1.5, 'S');
+
+              const pName = products[data.row.index]?.product_name || 'P';
+              const initial = pName.substring(0, 2).toUpperCase();
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(5.5);
+              doc.setTextColor(100, 116, 139);
+              doc.text(initial, px + size / 2, py + size / 2 + 1.5, { align: 'center' });
+            }
+          }
+
+          // Column 4: Scannable Barcode Image
+          if (data.column.index === 4) {
+            const barcodeB64 = barcodeMap.get(data.row.index);
+            if (barcodeB64) {
+              const bw = 42;
+              const bh = 11.8;
+              const bx = data.cell.x + (data.cell.width - bw) / 2;
+              const by = data.cell.y + (data.cell.height - bh) / 2;
+              try {
+                doc.addImage(barcodeB64, 'PNG', bx, by, bw, bh);
+              } catch {
+                // Print raw text fallback
+                const rawCode = products[data.row.index]?.barcode || products[data.row.index]?.product_code || '-';
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(7.5);
+                doc.setTextColor(71, 85, 105);
+                doc.text(String(rawCode), data.cell.x + data.cell.width / 2, data.cell.y + data.cell.height / 2 + 1, { align: 'center' });
+              }
+            } else {
+              const rawCode = products[data.row.index]?.barcode || products[data.row.index]?.product_code || '-';
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(7.5);
+              doc.setTextColor(148, 163, 184);
+              doc.text(String(rawCode), data.cell.x + data.cell.width / 2, data.cell.y + data.cell.height / 2 + 1, { align: 'center' });
+            }
+          }
+        }
+      },
+    });
+
+    // 5. Number every page cleanly: "Page X of Y"
+    const totalPages = (doc as any).internal.getNumberOfPages();
+    for (let p = 1; p <= totalPages; p++) {
+      doc.setPage(p);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.setTextColor(148, 163, 184); // slate-400
+      doc.text(`Page ${p} of ${totalPages}`, pageWidth - margin, pageHeight - 5.5, { align: 'right' });
+      doc.text(`ShomeDesk POS Suite • SalesPlay Live Catalog • Scannable Barcodes & Product Photos (${products.length} Items)`, margin, pageHeight - 5.5);
+    }
+
+    const filename = `SalesPlay_Product_Catalog_Barcodes_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`;
+    doc.save(filename);
+    toast.success(`Successfully downloaded ${products.length} products PDF with scannable barcodes (${totalPages} Pages)!`, { id: toastId });
+    return true;
+  } catch (err: any) {
+    console.error('Failed to generate product report PDF:', err);
+    toast.error('Failed to generate product report PDF', { id: toastId });
+    return false;
+  }
+}
+
+/**
+ * Exports complete SalesPlay Product Catalog into an Excel spreadsheet (.xlsx)
+ */
+export function exportProductReportExcel({
+  products,
+  businessName = 'MAKAREM ALKHAIR MODERN',
+  currency = 'OMR',
+}: {
+  products: SalesPlayProduct[];
+  businessName?: string;
+  currency?: string;
+}): boolean {
+  if (!products || products.length === 0) {
+    toast.error('No products to export');
+    return false;
+  }
+
+  const toastId = toast.loading('Preparing Excel spreadsheet...');
+
+  try {
+    const dataToExport = products.map((p, index) => {
+      const stock = Number(p.in_stock) || 0;
+      const cost = Number(p.cost) || 0;
+      const price = Number(p.price) || 0;
+      const totalCostVal = Math.round(stock * cost * 1000) / 1000;
+      const totalRetailVal = Math.round(stock * price * 1000) / 1000;
+      const margin = price > 0 ? Math.round(((price - cost) / price) * 1000) / 10 : 0;
+
+      return {
+        'SL #': index + 1,
+        'Product Name': p.product_name || 'Unnamed',
+        'Category': p.category || 'General',
+        'Sub Category': p.sub_category || '',
+        'Barcode': p.barcode || '',
+        'Product Code': p.product_code || '',
+        [`Unit Cost (${currency})`]: cost,
+        [`Sale Price (${currency})`]: price,
+        'Stock Qty': stock,
+        'Measurement': p.measurement || 'pcs',
+        [`Total Cost Value (${currency})`]: totalCostVal,
+        [`Total Retail Value (${currency})`]: totalRetailVal,
+        'Profit Margin (%)': `${margin}%`,
+      };
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    worksheet['!cols'] = [
+      { wch: 6 },  // SL #
+      { wch: 36 }, // Product Name
+      { wch: 18 }, // Category
+      { wch: 16 }, // Sub Category
+      { wch: 18 }, // Barcode
+      { wch: 14 }, // Product Code
+      { wch: 14 }, // Unit Cost
+      { wch: 14 }, // Sale Price
+      { wch: 12 }, // Stock Qty
+      { wch: 12 }, // Unit
+      { wch: 18 }, // Total Cost Value
+      { wch: 18 }, // Total Retail Value
+      { wch: 16 }, // Margin %
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Products & Inventory');
+
+    const cleanBiz = businessName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `${cleanBiz}_Product_Report_${format(new Date(), 'yyyyMMdd_HHmm')}.xlsx`;
+    XLSX.writeFile(workbook, filename);
+
+    toast.success(`Exported ${products.length} products to Excel!`, { id: toastId });
+    return true;
+  } catch (err: any) {
+    console.error('Failed to export products Excel:', err);
+    toast.error('Failed to export Excel report', { id: toastId });
+    return false;
+  }
+}
