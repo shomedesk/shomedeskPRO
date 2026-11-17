@@ -10,11 +10,31 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="manifest" href="/manifest.json" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="ShomeDesk" />
     <meta name="theme-color" content="#0F172A" />
+    <script>
+      // Immediately unlock orientation for tablets & mobile PWA so landscape auto-rotate works
+      (function() {
+        function unlockScreen() {
+          try {
+            if (window.screen && window.screen.orientation && typeof window.screen.orientation.unlock === 'function') {
+              window.screen.orientation.unlock().catch(function() {});
+            }
+          } catch (e) {}
+        }
+        unlockScreen();
+        window.addEventListener('DOMContentLoaded', unlockScreen);
+        window.addEventListener('load', unlockScreen);
+        window.addEventListener('orientationchange', unlockScreen);
+        document.addEventListener('visibilitychange', function() {
+          if (document.visibilityState === 'visible') unlockScreen();
+        });
+      })();
+    </script>
   </head>
   <body class="bg-[#0F172A] text-slate-100 min-h-screen" style="background-color: #0F172A; margin: 0; color: #f8fafc;">
     <div id="root" class="min-h-screen">

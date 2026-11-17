@@ -597,6 +597,14 @@ app.get('/api/salesplay/image-proxy', async (req, res) => {
   }
 });
 
+// Explicitly serve Web App Manifest with correct MIME type and no-cache
+app.get(['/manifest.webmanifest', '/manifest.json'], (_req, res) => {
+  const manifestFile = path.resolve(__dirname, 'public', 'manifest.json');
+  res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  return res.sendFile(manifestFile);
+});
+
 // Production vs Development routing
 const distPath = path.resolve(__dirname, 'dist');
 const hasDist = fs.existsSync(path.resolve(distPath, 'index.html'));

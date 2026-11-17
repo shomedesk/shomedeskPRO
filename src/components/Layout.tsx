@@ -43,6 +43,7 @@ import CurrencyTicker from './CurrencyTicker';
 import BusinessAssistant from './BusinessAssistant';
 import { BluetoothPrinterModal } from './BluetoothPrinterModal';
 import { subscribePrinterState } from '@/src/lib/bluetoothPrinter';
+import OrientationButton from './OrientationButton';
 
 export default function Layout() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(typeof window !== 'undefined' ? window.innerWidth >= 1024 : false);
@@ -391,6 +392,8 @@ export default function Layout() {
                 <Bluetooth size={13} className={isBtConnected ? "text-emerald-400" : ""} />
                 <span className="hidden sm:inline">{isBtConnected ? `58mm: ${btName || 'Online'}` : '58mm Printer'}</span>
               </button>
+
+              <OrientationButton />
 
               <NotificationCenter />
               <div className="h-6 md:h-8 w-px bg-slate-800" />
