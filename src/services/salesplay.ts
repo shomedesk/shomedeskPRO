@@ -401,225 +401,16 @@ export async function syncAllSalesPlayCatalogToFirestore(businessId?: string): P
  * Update inventory levels in SalesPlay (increments stock when purchase bill is logged)
  */
 export async function updateSalesPlayInventory(
-  shopId: string,
-  itemsToUpdate: { productId: string; quantityToAdd?: number; quantityDelta?: number }[],
-  token?: string
+  _shopId: string,
+  _itemsToUpdate: { productId: string; quantityToAdd?: number; quantityDelta?: number }[],
+  _token?: string
 ): Promise<{ success: boolean; message: string; updatedCount: number }> {
-  if (!itemsToUpdate || itemsToUpdate.length === 0) {
-    return { success: true, message: 'No items to update', updatedCount: 0 };
-  }
-
-  const authToken = token || DEFAULT_SALESPLAY_CONFIG.apiToken;
-  const targetShop = shopId || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
-
-  // Filter down to valid SalesPlay product IDs and non-zero deltas
-  const validItems = itemsToUpdate
-    .map(i => {
-      const delta = i.quantityDelta !== undefined ? Number(i.quantityDelta) : Number(i.quantityToAdd);
-      return {
-        productId: i.productId,
-        delta: isNaN(delta) ? 0 : delta,
-      };
-    })
-    .filter(i => 
-      i.productId && 
-      typeof i.productId === 'string' && 
-      i.productId.length > 10 && 
-      !i.productId.startsWith('item_') && 
-      !i.productId.startsWith('sp_') &&
-      i.delta !== 0
-    );
-
-  if (validItems.length === 0) {
-    return { 
-      success: true, 
-      message: 'No SalesPlay items with non-zero stock changes to update in inventory', 
-      updatedCount: 0 
-    };
-  }
-
-  try {
-    // 1. Fetch current live stock AND full raw products + categories BEFORE touching inventory
-    const [invData, rawProdResp, catResp] = await Promise.all([
-      safeFetchSalesPlayJson<{ inventory_levels?: any[] }>('/inventory', {
-        headers: { 'Authorization': `Bearer ${authToken}` },
-      }),
-      safeFetchSalesPlayJson<{ products?: any[] }>('/products', {
-        headers: { 'Authorization': `Bearer ${authToken}` },
-      }),
-      safeFetchSalesPlayJson<{ categories?: any[] }>('/category', {
-        headers: { 'Authorization': `Bearer ${authToken}` },
-      }),
-    ]);
-
-    const rawProductMap = new Map<string, any>();
-    for (const rp of (rawProdResp?.products || [])) {
-      if (rp?.id && Number(rp.cost) > 0 && Array.isArray(rp.shops) && rp.shops.length > 0) {
-        rawProductMap.set(rp.id, rp);
-      }
-    }
-
-    const categoryIdMap = new Map<string, string>();
-    for (const c of (catResp?.categories || [])) {
-      if (c?.category_name && c?.id) {
-        categoryIdMap.set(String(c.category_name).trim().toLowerCase(), c.id);
-      }
-    }
-
-    const levels = invData?.inventory_levels || [];
-    const stockMap: { [productId: string]: number } = {};
-    for (const lvl of levels) {
-      if (!targetShop || lvl.shop_id === targetShop) {
-        stockMap[lvl.product_id] = Number(lvl.in_stock) || 0;
-      }
-    }
-
-    // 2. Prepare payload (supports both stock gain (+) and stock reduction/return (-))
-    const inventoryLevelsPayload = validItems.map(item => {
-      const currentStock = stockMap[item.productId] ?? 0;
-      const newStock = Math.max(0, currentStock + item.delta);
-      return {
-        shop_id: targetShop,
-        product_id: item.productId,
-        in_stock: Math.round(newStock * 1000) / 1000,
-      };
-    });
-
-    // 3. Post stock updates batch
-    const result = await safeFetchSalesPlayJson<{ 
-      success?: any; 
-      code?: string; 
-      errors?: { details?: string; field?: string }; 
-      message?: string 
-    }>('/inventory', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${authToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        inventory_levels: inventoryLevelsPayload,
-      }),
-    });
-
-    const isSuccess = !!result && (
-      result.code === 'SUCCESS' ||
-      result.success === true ||
-      (typeof result.success === 'object' && result.success !== null)
-    );
-
-    // Second-line safeguard: Verify live SalesPlay product costs after inventory update.
-    // Proxy server.ts already restores and verifies costs; this ensures fallback direct calls also never lose cost.
-    const restoreProtectedCosts = async () => {
-      try {
-        if (rawProductMap.size === 0) return;
-
-        // Check live products right now to see if any item's cost dropped to <= 0
-        const verifyResp = await safeFetchSalesPlayJson<{ products?: any[] }>('/products', {
-          headers: { 'Authorization': `Bearer ${authToken}` },
-        });
-        const liveProds = verifyResp?.products || [];
-
-        for (const itm of validItems) {
-          const origProd = rawProductMap.get(itm.productId);
-          if (!origProd || Number(origProd.cost) <= 0) continue;
-
-          const live = liveProds.find((p: any) => p.id === itm.productId);
-          // Only restore if live cost actually became 0 or disappeared
-          if (!live || Number(live.cost) <= 0) {
-            const catName = String(origProd.category || '').trim().toLowerCase();
-            const resolvedCatId = catName ? categoryIdMap.get(catName) : undefined;
-            const pPayload: Record<string, any> = {
-              id: origProd.id,
-              product_code: origProd.product_code,
-              product_name: origProd.product_name,
-              barcode: origProd.barcode || '',
-              cost: origProd.cost,
-              stock_control: origProd.stock_control ?? true,
-              safety_stock: origProd.safety_stock ?? 0,
-              product_price_change: Boolean(origProd.price_change),
-              qty_change_option: Boolean(origProd.quantity_change),
-              expire_mode: Boolean(origProd.stock_expire_mode),
-              is_composite: Boolean(origProd.is_composite),
-              use_production: Boolean(origProd.use_production),
-              is_combo: Boolean(origProd.is_combo),
-              is_ingredient: Boolean(origProd.is_ingredient),
-              is_vat_product: Boolean(origProd.is_vat_product),
-              is_variant: Boolean(origProd.is_variant),
-              image_url: origProd.image_url || '',
-              shops: origProd.shops,
-            };
-            if (resolvedCatId) {
-              pPayload.category_id = resolvedCatId;
-            }
-            await safeFetchSalesPlayJson('/products', {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${authToken}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify(pPayload),
-            });
-          }
-        }
-      } catch (rErr) {
-        console.warn('Notice in cost preservation:', rErr);
-      }
-    };
-
-    if (isSuccess) {
-      await restoreProtectedCosts();
-      return {
-        success: true,
-        message: 'SalesPlay stock updated successfully',
-        updatedCount: inventoryLevelsPayload.length,
-      };
-    }
-
-    // If batch failed (e.g. one product in array was deleted in SalesPlay), retry item-by-item so valid items still gain stock!
-    let individualSuccessCount = 0;
-    for (const singleItem of inventoryLevelsPayload) {
-      try {
-        const singleRes = await safeFetchSalesPlayJson<{ success?: any; code?: string }>('/inventory', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${authToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            inventory_levels: [singleItem],
-          }),
-        });
-        if (singleRes && (singleRes.code === 'SUCCESS' || singleRes.success === true || typeof singleRes.success === 'object')) {
-          individualSuccessCount++;
-        }
-      } catch {
-        // continue
-      }
-    }
-
-    if (individualSuccessCount > 0) {
-      await restoreProtectedCosts();
-      return {
-        success: true,
-        message: `Updated stock for ${individualSuccessCount} of ${inventoryLevelsPayload.length} items in SalesPlay POS`,
-        updatedCount: individualSuccessCount,
-      };
-    }
-
-    return {
-      success: false,
-      message: result?.errors?.details || result?.message || 'Failed to update SalesPlay stock',
-      updatedCount: 0,
-    };
-  } catch (error: any) {
-    console.warn('SalesPlay inventory update notice:', error);
-    return {
-      success: false,
-      message: error?.message || 'Network error updating SalesPlay',
-      updatedCount: 0,
-    };
-  }
+  // SalesPlay POS inventory writes are disabled because SalesPlay's POST /inventory resets item cost to 0.000 on their backend.
+  return {
+    success: true,
+    message: 'SalesPlay POS auto-stock sync disabled (SalesPlay item costs strictly protected)',
+    updatedCount: 0,
+  };
 }
 
 export interface SalesPlayProductCostUpdate {
@@ -670,9 +461,9 @@ export interface BillSyncItem {
  * 2. Strictly preserves existing product costs in SalesPlay (does NOT overwrite or reset to 0.000).
  */
 export async function syncBillToSalesPlay(
-  shopId: string,
-  items: BillSyncItem[],
-  token?: string,
+  _shopId: string,
+  _items: BillSyncItem[],
+  _token?: string,
   _options?: { updateCosts?: boolean }
 ): Promise<{
   success: boolean;
@@ -680,68 +471,12 @@ export async function syncBillToSalesPlay(
   costUpdatedCount: number;
   message: string;
 }> {
-  const authToken = token || DEFAULT_SALESPLAY_CONFIG.apiToken;
-  const targetShop = shopId || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
-
-  // IMPORTANT: When entering a Purchase Bill or Purchase Order,
-  // existing SalesPlay product costs MUST NOT change or become 0.000.
-  // Existing costs in SalesPlay must remain 100% untouched.
-  const costResult = { success: true, updatedCount: 0, message: 'Existing product costs strictly preserved in SalesPlay' };
-
-  // 2. Resolve product IDs for inventory stock update
-  let resolvedInventoryItems: { productId: string; quantityToAdd: number }[] = [];
-  try {
-    const prodData = await safeFetchSalesPlayJson<{ products?: any[] }>('/products', {
-      headers: { 'Authorization': `Bearer ${authToken}` },
-    });
-    const catalog = prodData?.products || [];
-
-    for (const item of items) {
-      let pId = item.productId;
-      if (!pId || pId.length < 5 || pId.startsWith('item_') || pId.startsWith('sp_')) {
-        const found = catalog.find((p: any) =>
-          (item.barcode && p.barcode && p.barcode.trim() === item.barcode.trim()) ||
-          (item.productCode && p.product_code && p.product_code.trim() === item.productCode.trim()) ||
-          (item.name && p.product_name && p.product_name.trim().toLowerCase() === item.name.trim().toLowerCase())
-        );
-        if (found?.id) {
-          pId = found.id;
-        }
-      }
-
-      if (pId && pId.length > 5 && !pId.startsWith('item_') && !pId.startsWith('sp_')) {
-        resolvedInventoryItems.push({
-          productId: pId,
-          quantityToAdd: Number(item.quantityToAdd) || 0,
-        });
-      }
-    }
-  } catch {
-    resolvedInventoryItems = items
-      .filter(i => i.productId && i.productId.length > 10 && !i.productId.startsWith('item_'))
-      .map(i => ({ productId: i.productId!, quantityToAdd: Number(i.quantityToAdd) || 0 }));
-  }
-
-  // 3. Update stock levels in SalesPlay
-  let stockUpdatedCount = 0;
-  let stockSuccess = false;
-  let stockMessage = '';
-  if (resolvedInventoryItems.length > 0) {
-    const invResult = await updateSalesPlayInventory(targetShop, resolvedInventoryItems, authToken);
-    stockUpdatedCount = invResult.updatedCount;
-    stockSuccess = invResult.success;
-    stockMessage = invResult.message;
-  } else {
-    stockMessage = 'No matching SalesPlay product IDs found to update stock.';
-  }
-
+  // Disabled per user choice: never call SalesPlay POST /inventory from P.Order or Purchase Bill so SalesPlay item costs never reset to 0.000.
   return {
-    success: stockSuccess,
-    stockUpdatedCount,
+    success: true,
+    stockUpdatedCount: 0,
     costUpdatedCount: 0,
-    message: stockSuccess
-      ? `SalesPlay POS: Stock (+${stockUpdatedCount} items) updated! (Item costs strictly preserved)`
-      : stockMessage || 'Could not update stock in SalesPlay',
+    message: 'SalesPlay auto-stock update disabled (item costs protected in SalesPlay)',
   };
 }
 

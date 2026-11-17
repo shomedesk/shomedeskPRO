@@ -726,45 +726,7 @@ export function PurchaseOrderManager({
         }
       }
 
-      // Auto-sync stock count into SalesPlay POS (costs/prices are 100% preserved)
-      if (items.length > 0) {
-        try {
-          const spSettings = await getSalesPlaySettings(activeBusiness.id);
-          const mappedShop = (branchId && spSettings.branchShopMap && spSettings.branchShopMap[branchId])
-            || spSettings.selectedShopId
-            || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
-
-          const syncItems = items.map(item => {
-            let pId = item.productId;
-            if (!pId || pId.length < 5 || pId.startsWith('item_')) {
-              const found = salesPlayProducts.find(p =>
-                (item.barcode && p.barcode && p.barcode.trim() === item.barcode.trim()) ||
-                (item.productCode && p.product_code && p.product_code.trim() === item.productCode.trim()) ||
-                (item.name && p.product_name && p.product_name.trim().toLowerCase() === item.name.trim().toLowerCase())
-              );
-              if (found && found.id) {
-                pId = found.id;
-              }
-            }
-            return {
-              productId: pId,
-              productCode: item.productCode,
-              barcode: item.barcode,
-              name: item.name,
-              quantityToAdd: Number(item.quantity) || 1,
-              unitCost: Number(item.unitPrice) || 0,
-              salesPrice: Number(item.salesPrice) || 0,
-            };
-          });
-
-          const spResult = await syncBillToSalesPlay(mappedShop, syncItems, spSettings.apiToken);
-          if (spResult.success && spResult.stockUpdatedCount > 0) {
-            toast.success(`SalesPlay POS: Stock (+${spResult.stockUpdatedCount} items) updated! (Costs preserved)`);
-          }
-        } catch (spErr) {
-          console.warn('Notice syncing PO stock to SalesPlay:', spErr);
-        }
-      }
+      // SalesPlay POS auto-stock sync disabled per user request so SalesPlay item costs are never reset to 0.000.
 
       // Immediately open printable PO Bill modal for the newly generated order!
       setViewingPO({ id: docRef.id, ...payload } as any);
@@ -1463,8 +1425,6 @@ export function PurchaseOrderManager({
           branch={branches.find(b => b.id === viewingPO.branchId)}
           onClose={() => setViewingPO(null)}
           onEdit={() => handleStartEditPO(viewingPO)}
-          onSyncStock={() => handleSyncPoStockToSalesPlay(viewingPO)}
-          syncingStock={syncingPoStock}
           onOpenPrinterModal={() => setIsPrinterModalOpen(true)}
           isBtConnected={isBtConnected}
           btName={btName}

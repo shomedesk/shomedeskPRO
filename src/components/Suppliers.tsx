@@ -1023,62 +1023,7 @@ function PurchaseEntryForm({
         }
       }
 
-      // 5. SalesPlay Stock & Cost Sync
-      // Match and resolve real SalesPlay items, computing exact per-piece retail cost
-      // (e.g. Chips: 1 pack = 24 pcs, 1.000 OMR / pack -> unitCost = 0.042 OMR/piece in SalesPlay POS)
-      const syncItems = billItems.map(item => {
-        let pId = item.productId;
-        if (!pId || pId.length < 5 || pId.startsWith('item_')) {
-          const found = salesPlayProducts.find(p => 
-            (item.barcode && p.barcode && p.barcode.trim() === item.barcode.trim()) ||
-            (item.productCode && p.product_code && p.product_code.trim() === item.productCode.trim()) ||
-            (item.name && p.product_name && p.product_name.trim().toLowerCase() === item.name.trim().toLowerCase())
-          );
-          if (found && found.id) {
-            pId = found.id;
-          }
-        }
-
-        const perPieceCost = item.orderMode === 'pack' && item.piecesPerPack && item.packPrice
-          ? Math.round(((Number(item.packPrice) || 0) / Math.max(1, Number(item.piecesPerPack))) * 1000) / 1000
-          : (Number(item.unitPrice) || 0);
-
-        return {
-          productId: pId,
-          productCode: item.productCode,
-          barcode: item.barcode,
-          name: item.name,
-          quantityToAdd: Number(item.quantity) || 1,
-          unitCost: perPieceCost,
-          salesPrice: Number(item.salesPrice) || 0,
-        };
-      });
-
-      if (syncItems.length > 0) {
-        try {
-          const spSettings = await getSalesPlaySettings(activeBusiness.id);
-          const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[selectedBranchId])
-            || spSettings.selectedShopId
-            || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
-
-          const spResult = await syncBillToSalesPlay(mappedShop, syncItems, spSettings.apiToken);
-          if (spResult.success) {
-            await updateDoc(docRef, { 
-              syncedToSalesPlay: true, 
-              salesPlayShopId: mappedShop,
-              salesPlayUpdatedCount: spResult.stockUpdatedCount,
-              salesPlayCostUpdatedCount: spResult.costUpdatedCount,
-            });
-            toast.success(`SalesPlay POS: Stock (+${spResult.stockUpdatedCount} items) updated! (Existing item costs preserved)`);
-          } else {
-            console.warn('SalesPlay sync notice:', spResult.message);
-            toast.warning(`Bill saved, but SalesPlay notice: ${spResult.message}`);
-          }
-        } catch (spErr: any) {
-          console.warn('SalesPlay sync notice:', spErr);
-          toast.warning(`Bill saved, but SalesPlay sync notice: ${spErr?.message || 'Network issue'}`);
-        }
-      }
+      // SalesPlay POS auto-stock sync disabled so SalesPlay item costs are never reset to 0.000.
 
       toast.success('Purchase bill logged successfully! Supplier product catalog updated.');
       setFormData({ supplierId: '', invoiceNumber: getNextInvoiceNumber(), billAmount: 0, paidAmount: 0 });
@@ -1926,34 +1871,7 @@ function RecentLogs({
         }
       }
 
-      // 4. Revert stock in SalesPlay if items were synced
-      if (log.items && log.items.length > 0 && log.syncedToSalesPlay) {
-        try {
-          const spSettings = await getSalesPlaySettings(log.businessId || activeBusinessId || 'default');
-          const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[log.branchId])
-            || spSettings.selectedShopId
-            || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
-
-          const revertItems = log.items
-            .map(i => {
-              const spId = (i.productId && i.productId.length > 10 && !i.productId.startsWith('item_'))
-                ? i.productId
-                : salesPlayProducts.find(p => p.barcode === i.barcode || p.product_name === i.name)?.id;
-              return {
-                productId: spId || '',
-                quantityDelta: -(Number(i.quantity) || 0),
-              };
-            })
-            .filter(i => i.productId && i.productId.length > 10 && i.quantityDelta !== 0);
-
-          if (revertItems.length > 0) {
-            await updateSalesPlayInventory(mappedShop, revertItems, spSettings.apiToken);
-            toast.info(`Reverted stock for ${revertItems.length} items in SalesPlay POS`);
-          }
-        } catch (spErr) {
-          console.warn('Notice reverting SalesPlay stock on delete:', spErr);
-        }
-      }
+      // SalesPlay stock revert on bill delete disabled to protect SalesPlay item costs from resetting to 0.000.
 
       toast.success(`Purchase bill #${log.invoiceNumber} deleted from database`);
     } catch (err) {

@@ -325,29 +325,10 @@ export function EditPurchaseBillModal({
         }
       });
 
-      // 2. Perform live SalesPlay Stock & Cost Updates
-      let spSyncSuccess = false;
-      let spUpdatedCount = 0;
-      let spCostUpdatedCount = 0;
-      if (activeBusinessId) {
-        try {
-          const spSettings = await getSalesPlaySettings(activeBusinessId);
-          const mappedShop = (spSettings.branchShopMap && spSettings.branchShopMap[branchId])
-            || spSettings.selectedShopId
-            || DEFAULT_SALESPLAY_CONFIG.defaultShopId;
-
-          // A. Stock updates
-          if (stockUpdates.length > 0) {
-            const spRes = await updateSalesPlayInventory(mappedShop, stockUpdates, spSettings.apiToken);
-            spSyncSuccess = spRes.success;
-            spUpdatedCount = spRes.updatedCount;
-          }
-
-          // B. Note: SalesPlay product costs are preserved as requested by the user. Only stock quantities are adjusted.
-        } catch (spErr) {
-          console.warn('SalesPlay edit sync notice:', spErr);
-        }
-      }
+      // SalesPlay stock adjustment disabled to strictly protect SalesPlay item costs from resetting to 0.000.
+      const spSyncSuccess = false;
+      const spUpdatedCount = 0;
+      const spCostUpdatedCount = 0;
 
       // 3. Update purchaseLogs Document in Firestore
       const logRef = doc(db, 'purchaseLogs', log.id);

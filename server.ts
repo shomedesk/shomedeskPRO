@@ -191,19 +191,14 @@ app.all('/api/salesplay*', async (req, res) => {
   try {
     const cleanPath = targetPath.split('?')[0];
 
-    // STRICT USER CONSTRAINT: Block any attempt to wipe or reset product cost to 0.000 in SalesPlay.
-    // Stock is incremented strictly via POST /inventory. Existing product costs must remain 100% untouched.
+    // STRICT USER CONSTRAINT: Block all POST/PUT writes to /products in SalesPlay so existing costs/prices remain 100% untouched.
     if ((req.method === 'POST' || req.method === 'PUT') && (cleanPath === '/products' || cleanPath === '/product')) {
-      const bodyCost = Number(req.body?.cost);
-      const hasValidShops = Array.isArray(req.body?.shops) && req.body.shops.length > 0;
-      if (isNaN(bodyCost) || bodyCost <= 0 || !hasValidShops) {
-        console.log('Blocked malformed or zero-cost POST/PUT /products to strictly protect existing SalesPlay costs.');
-        return res.status(200).json({
-          code: 'SUCCESS',
-          success: true,
-          message: 'Existing product costs and prices strictly preserved in SalesPlay POS',
-        });
-      }
+      console.log('Blocked POST/PUT /products to strictly protect existing SalesPlay costs and catalog.');
+      return res.status(200).json({
+        code: 'SUCCESS',
+        success: true,
+        message: 'Existing product costs and prices strictly preserved in SalesPlay POS',
+      });
     }
 
     // Special auto-paginated handling for GET /products:
@@ -262,147 +257,18 @@ app.all('/api/salesplay*', async (req, res) => {
       });
     }
 
-    // Special handling for POST /inventory:
-    // SalesPlay's backend has a defect where POST /inventory resets products.cost to 0.000.
-    // To strictly preserve existing product costs & categories every time:
-    // 1. Capture full original product objects (cost, shops, category, flags) + category ID map BEFORE POST /inventory
-    // 2. Execute POST /inventory to update stock ONLY
-    // 3. Re-assert exact original cost, category_id, and shops immediately via POST /products
-    // 4. Verify via GET /products and retry if any item still has cost <= 0
-    if (req.method === 'POST' && cleanPath === '/inventory') {
-      const invLevels = req.body?.inventory_levels;
-      const productIds: string[] = Array.isArray(invLevels)
-        ? Array.from(new Set(invLevels.map((x: any) => x.product_id).filter(Boolean)))
-        : [];
-
-      const productsToProtect: any[] = [];
-      const categoryIdMap = new Map<string, string>();
-
-      if (productIds.length > 0) {
-        try {
-          // Fast targeted fetch of exact products being updated
-          let fetchedProds: any[] = [];
-          try {
-            const targetRes = await executeSalesPlayRequest('/products', 'GET', headers, {
-              product_ids: productIds.join(','),
-            });
-            if (targetRes.statusCode === 200) {
-              const parsed = JSON.parse(targetRes.data);
-              if (Array.isArray(parsed.products)) {
-                fetchedProds = parsed.products;
-              }
-            }
-          } catch {}
-
-          // Fallback to full catalog scan if any product wasn't found in targeted fetch
-          if (fetchedProds.length < productIds.length) {
-            const allProds = await fetchAllSalesPlayProductsList(headers);
-            const seen = new Set(fetchedProds.map((p: any) => p.id));
-            for (const p of allProds) {
-              if (p.id && !seen.has(p.id)) {
-                fetchedProds.push(p);
-                seen.add(p.id);
-              }
-            }
-          }
-
-          for (const pid of productIds) {
-            const matched = fetchedProds.find((p: any) => p.id === pid);
-            if (matched && Number(matched.cost) > 0) {
-              productsToProtect.push(matched);
-            }
-          }
-
-          // Fetch category list to preserve category_id when restoring cost
-          if (productsToProtect.length > 0) {
-            try {
-              const catRes = await executeSalesPlayRequest('/category', 'GET', headers, { limit: 250 });
-              if (catRes.statusCode === 200) {
-                const catParsed = JSON.parse(catRes.data);
-                for (const c of (catParsed.categories || [])) {
-                  if (c.category_name && c.id) {
-                    categoryIdMap.set(String(c.category_name).trim().toLowerCase(), c.id);
-                  }
-                }
-              }
-            } catch {}
-          }
-        } catch (err) {
-          console.warn('Notice fetching products to protect costs:', err);
-        }
-      }
-
-      // 2. Execute standard inventory stock update
-      const invResult = await executeSalesPlayRequest('/inventory', 'POST', headers, req.body);
-
-      const buildRestorePayload = (origProd: any) => {
-        const catName = String(origProd.category || '').trim().toLowerCase();
-        const resolvedCatId = catName ? categoryIdMap.get(catName) : undefined;
-        const pPayload: Record<string, any> = {
-          id: origProd.id,
-          product_code: origProd.product_code,
-          product_name: origProd.product_name,
-          barcode: origProd.barcode || '',
-          cost: origProd.cost,
-          stock_control: origProd.stock_control ?? true,
-          safety_stock: origProd.safety_stock ?? 0,
-          product_price_change: Boolean(origProd.price_change),
-          qty_change_option: Boolean(origProd.quantity_change),
-          expire_mode: Boolean(origProd.stock_expire_mode),
-          is_composite: Boolean(origProd.is_composite),
-          use_production: Boolean(origProd.use_production),
-          is_combo: Boolean(origProd.is_combo),
-          is_ingredient: Boolean(origProd.is_ingredient),
-          is_vat_product: Boolean(origProd.is_vat_product),
-          is_variant: Boolean(origProd.is_variant),
-          image_url: origProd.image_url || '',
-          shops: Array.isArray(origProd.shops) ? origProd.shops : [],
-        };
-        if (resolvedCatId) {
-          pPayload.category_id = resolvedCatId;
-        }
-        return pPayload;
-      };
-
-      // 3. If inventory update succeeded and we had products with positive costs, restore their exact costs & verify!
-      if (invResult.statusCode === 200 && productsToProtect.length > 0) {
-        for (const origProd of productsToProtect) {
-          try {
-            const pPayload = buildRestorePayload(origProd);
-            const restoreRes = await executeSalesPlayRequest('/products', 'POST', headers, pPayload);
-            if (restoreRes.statusCode !== 200 || restoreRes.data.includes('"errors"')) {
-              console.warn(`Retry restoring cost for ${origProd.product_name}:`, restoreRes.statusCode, restoreRes.data);
-              await executeSalesPlayRequest('/products', 'POST', headers, pPayload);
-            }
-          } catch (resErr) {
-            console.warn('Notice re-asserting protected product cost:', resErr);
-          }
-        }
-
-        // 4. Verify via GET /products that EVERY protected item retained its positive cost
-        try {
-          const checkRes = await executeSalesPlayRequest('/products', 'GET', headers, {
-            product_ids: productsToProtect.map((p: any) => p.id).join(','),
-          });
-          if (checkRes.statusCode === 200) {
-            const verifiedList = JSON.parse(checkRes.data)?.products || [];
-            for (const origProd of productsToProtect) {
-              const current = verifiedList.find((v: any) => v.id === origProd.id);
-              if (current && Number(current.cost) <= 0) {
-                console.warn(`Verification caught zero cost for ${origProd.product_name}, re-applying ${origProd.cost}`);
-                await executeSalesPlayRequest('/products', 'POST', headers, buildRestorePayload(origProd));
-              }
-            }
-          }
-        } catch (verifyErr) {
-          console.warn('Notice verifying restored product costs:', verifyErr);
-        }
-      }
-
-      res.status(invResult.statusCode);
-      const ct = invResult.headers['content-type'];
-      if (ct) res.setHeader('Content-Type', ct);
-      return res.send(invResult.data);
+    // STRICT USER CONSTRAINT (Option 1): Disable SalesPlay POST/PUT /inventory writes.
+    // SalesPlay's backend resets item costs to 0.000 whenever POST /inventory is called.
+    // Short-circuiting here guarantees even older cached clients never trigger a 0.000 cost reset.
+    if ((req.method === 'POST' || req.method === 'PUT') && cleanPath === '/inventory') {
+      console.log('Blocked POST/PUT /inventory per Option 1 so SalesPlay item costs remain 100% untouched.');
+      return res.status(200).json({
+        success: {
+          code: 'SUCCESS',
+          details: 'SalesPlay inventory write disabled to protect item costs',
+        },
+        code: 'SUCCESS',
+      });
     }
 
     // Special auto-paginated handling for POST /receipts:
