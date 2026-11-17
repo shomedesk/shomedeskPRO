@@ -35,8 +35,9 @@ async function safeFetchSalesPlayJson<T>(
     try {
       if (typeof options.body === 'string') {
         const bodyObj = JSON.parse(options.body);
-        if (bodyObj.cost !== undefined && Number(bodyObj.cost) <= 0) {
-          console.warn('Blocked client-side POST /products with cost <= 0 to strictly protect existing SalesPlay costs.');
+        const hasValidShops = Array.isArray(bodyObj.shops) && bodyObj.shops.length > 0;
+        if ((bodyObj.cost !== undefined && Number(bodyObj.cost) <= 0) || !hasValidShops) {
+          console.warn('Blocked client-side malformed or zero-cost POST /products to strictly protect existing SalesPlay costs.');
           return { code: 'SUCCESS', success: true, message: 'Costs strictly preserved in SalesPlay' } as any;
         }
       }
@@ -438,12 +439,32 @@ export async function updateSalesPlayInventory(
   }
 
   try {
-    // 1. Fetch current live stock
-    const invData = await safeFetchSalesPlayJson<{ inventory_levels?: any[] }>('/inventory', {
-      headers: {
-        'Authorization': `Bearer ${authToken}`,
-      },
-    });
+    // 1. Fetch current live stock AND full raw products + categories BEFORE touching inventory
+    const [invData, rawProdResp, catResp] = await Promise.all([
+      safeFetchSalesPlayJson<{ inventory_levels?: any[] }>('/inventory', {
+        headers: { 'Authorization': `Bearer ${authToken}` },
+      }),
+      safeFetchSalesPlayJson<{ products?: any[] }>('/products', {
+        headers: { 'Authorization': `Bearer ${authToken}` },
+      }),
+      safeFetchSalesPlayJson<{ categories?: any[] }>('/category', {
+        headers: { 'Authorization': `Bearer ${authToken}` },
+      }),
+    ]);
+
+    const rawProductMap = new Map<string, any>();
+    for (const rp of (rawProdResp?.products || [])) {
+      if (rp?.id && Number(rp.cost) > 0 && Array.isArray(rp.shops) && rp.shops.length > 0) {
+        rawProductMap.set(rp.id, rp);
+      }
+    }
+
+    const categoryIdMap = new Map<string, string>();
+    for (const c of (catResp?.categories || [])) {
+      if (c?.category_name && c?.id) {
+        categoryIdMap.set(String(c.category_name).trim().toLowerCase(), c.id);
+      }
+    }
 
     const levels = invData?.inventory_levels || [];
     const stockMap: { [productId: string]: number } = {};
@@ -487,33 +508,50 @@ export async function updateSalesPlayInventory(
       (typeof result.success === 'object' && result.success !== null)
     );
 
-    // Safeguard: re-assert positive product costs if any item had cost > 0
+    // Second-line safeguard: Verify live SalesPlay product costs after inventory update.
+    // Proxy server.ts already restores and verifies costs; this ensures fallback direct calls also never lose cost.
     const restoreProtectedCosts = async () => {
       try {
-        const cachedStr = typeof window !== 'undefined' ? localStorage.getItem('salesplay_cached_products') : null;
-        let knownProds: any[] = [];
-        if (cachedStr) {
-          try { knownProds = JSON.parse(cachedStr); } catch {}
-        }
+        if (rawProductMap.size === 0) return;
+
+        // Check live products right now to see if any item's cost dropped to <= 0
+        const verifyResp = await safeFetchSalesPlayJson<{ products?: any[] }>('/products', {
+          headers: { 'Authorization': `Bearer ${authToken}` },
+        });
+        const liveProds = verifyResp?.products || [];
+
         for (const itm of validItems) {
-          const match = knownProds.find((p: any) => p.id === itm.productId && Number(p.cost) > 0);
-          if (match) {
-            const pPayload = {
-              ...match,
-              product_price_change: false,
-              qty_change_option: false,
-              expire_mode: false,
-              is_composite: false,
-              use_production: false,
-              is_combo: false,
-              is_ingredient: false,
-              is_vat_product: false,
-              is_variant: false,
+          const origProd = rawProductMap.get(itm.productId);
+          if (!origProd || Number(origProd.cost) <= 0) continue;
+
+          const live = liveProds.find((p: any) => p.id === itm.productId);
+          // Only restore if live cost actually became 0 or disappeared
+          if (!live || Number(live.cost) <= 0) {
+            const catName = String(origProd.category || '').trim().toLowerCase();
+            const resolvedCatId = catName ? categoryIdMap.get(catName) : undefined;
+            const pPayload: Record<string, any> = {
+              id: origProd.id,
+              product_code: origProd.product_code,
+              product_name: origProd.product_name,
+              barcode: origProd.barcode || '',
+              cost: origProd.cost,
+              stock_control: origProd.stock_control ?? true,
+              safety_stock: origProd.safety_stock ?? 0,
+              product_price_change: Boolean(origProd.price_change),
+              qty_change_option: Boolean(origProd.quantity_change),
+              expire_mode: Boolean(origProd.stock_expire_mode),
+              is_composite: Boolean(origProd.is_composite),
+              use_production: Boolean(origProd.use_production),
+              is_combo: Boolean(origProd.is_combo),
+              is_ingredient: Boolean(origProd.is_ingredient),
+              is_vat_product: Boolean(origProd.is_vat_product),
+              is_variant: Boolean(origProd.is_variant),
+              image_url: origProd.image_url || '',
+              shops: origProd.shops,
             };
-            delete pPayload.created_date;
-            delete pPayload.updated_date;
-            delete pPayload.delete_date;
-            delete pPayload.in_stock;
+            if (resolvedCatId) {
+              pPayload.category_id = resolvedCatId;
+            }
             await safeFetchSalesPlayJson('/products', {
               method: 'POST',
               headers: {
